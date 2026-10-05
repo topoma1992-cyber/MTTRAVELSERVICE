@@ -1,0 +1,36 @@
+{
+  "url": "http://127.0.0.1:8080/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "Prenota · MT Travel",
+      "hasCanvas": false,
+      "bodyTextLen": 2634,
+      "bodyTextHash": "0f8e24239cf202cd17b78977606b82bc3722712005ed9d3fb352bb45ea330f42",
+      "bodyTextPrefix": "MT TRAVEL SERVICE NOLEGGIO CON CONDUCENTE IT EN Il percorso comp",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "Prenota · MT Travel",
+      "hasCanvas": false,
+      "bodyTextLen": 2649,
+      "bodyTextHash": "af47fa6b0a9ac51a13ec60f71054979cbd2c579e9b1336347931fba230f91334",
+      "bodyTextPrefix": "MT TRAVEL SERVICE NOLEGGIO CON CONDUCENTE IT EN Il percorso comp",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-preview.json"
+}
