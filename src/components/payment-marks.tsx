@@ -26,7 +26,7 @@ export function PaymentBadge({ method }: { method: PaymentMethod }) {
   }
   return (
     <span className="inline-flex h-7 items-center rounded border border-border bg-surface px-2 text-xs font-extrabold tracking-wide">
-      4 RATE
+      SCALAPAY
     </span>
   );
 }

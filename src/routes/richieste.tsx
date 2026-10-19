@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
+import { Bell } from "lucide-react";
 import {
   bookingMessage,
   confirmationMessage,
@@ -21,13 +22,33 @@ import {
 } from "@/lib/bookings.functions";
 import { RequestActions } from "@/components/request-actions";
 import { AlertSettings } from "@/components/alert-settings";
+import { DiscountCodes } from "@/components/discount-codes";
+import { StaffAccess } from "@/components/staff-access";
+import { StaffEdit } from "@/components/staff-edit";
 import { StaffQuote } from "@/components/staff-quote";
 import { PaymentBadge } from "@/components/payment-marks";
 import { euro, formatWhen, peopleLabel } from "@/lib/format";
-import { downloadDriverPdf } from "@/lib/pdf";
-import { VEHICLES } from "@/lib/tariff";
+import { downloadDriverPdf, type VatChoice } from "@/lib/pdf";
+import { fleetLabel, tripFleet } from "@/lib/tariff";
 
-const PIN_KEY = "mt-travel-staff-pin";
+const SESSION_KEY = "mt-travel-staff";
+const LEGACY_PIN_KEY = "mt-travel-staff-pin";
+const OWNER_EMAIL = "info@mttravelservice.com";
+
+function readSession() {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as { staffEmail?: string; pin?: string };
+      if (parsed.staffEmail && parsed.pin) return { staffEmail: parsed.staffEmail, pin: parsed.pin };
+    }
+  } catch {
+    /* sessione illeggibile */
+  }
+  const pin = localStorage.getItem(LEGACY_PIN_KEY);
+  if (pin) return { staffEmail: OWNER_EMAIL, pin };
+  return null;
+}
 
 export const Route = createFileRoute("/richieste")({
   head: () => ({
@@ -38,6 +59,7 @@ export const Route = createFileRoute("/richieste")({
 
 function RichiestePage() {
   const [phase, setPhase] = useState<"loading" | "setup" | "locked" | "ready">("loading");
+  const [staffEmail, setStaffEmail] = useState("");
   const [pin, setPin] = useState("");
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [error, setError] = useState("");
@@ -45,13 +67,17 @@ function RichiestePage() {
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [driverId, setDriverId] = useState<string | null>(null);
   const [rejectId, setRejectId] = useState<string | null>(null);
+  const [editId, setEditId] = useState<string | null>(null);
+  const [moreId, setMoreId] = useState<string | null>(null);
 
-  async function openWith(nextPin: string) {
-    const rows = await listStaffBookings({ data: { pin: nextPin } });
+  async function openWith(nextEmail: string, nextPin: string) {
+    const rows = await listStaffBookings({ data: { staffEmail: nextEmail, pin: nextPin } });
+    setStaffEmail(nextEmail);
     setPin(nextPin);
     setBookings(rows);
     setPhase("ready");
-    localStorage.setItem(PIN_KEY, nextPin);
+    localStorage.setItem(SESSION_KEY, JSON.stringify({ staffEmail: nextEmail, pin: nextPin }));
+    localStorage.removeItem(LEGACY_PIN_KEY);
   }
 
   useEffect(() => {
@@ -63,13 +89,14 @@ function RichiestePage() {
           setPhase("setup");
           return;
         }
-        const saved = localStorage.getItem(PIN_KEY) ?? "";
+        const saved = readSession();
         if (!saved) {
           setPhase("locked");
           return;
         }
-        return openWith(saved).catch(() => {
-          localStorage.removeItem(PIN_KEY);
+        return openWith(saved.staffEmail, saved.pin).catch(() => {
+          localStorage.removeItem(SESSION_KEY);
+          localStorage.removeItem(LEGACY_PIN_KEY);
           if (alive) setPhase("locked");
         });
       })
@@ -86,36 +113,41 @@ function RichiestePage() {
 
   return (
     <main className="mx-auto w-full max-w-3xl px-4 py-6 lg:py-10">
-      <p className="text-sm text-primary">Solo per te</p>
-      <h1 className="mt-1 font-display text-4xl">Richieste</h1>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-sm text-primary">Solo per te</p>
+          <h1 className="mt-1 text-center text-2xl">Richieste</h1>
+        </div>
+        {phase === "ready" ? <NoticeBell bookings={bookings} /> : null}
+      </div>
       <p className="mt-2 text-muted">
-        I clienti vedono solo la prenotazione. Qui arrivano le richieste, dopo il codice di gestione.
+        I clienti vedono solo la prenotazione. Qui arrivano le richieste, dopo l'accesso.
       </p>
 
       {phase === "loading" ? <p className="mt-8 text-muted">Carico…</p> : null}
       {phase === "setup" ? (
         <PinForm
           title="Crea il codice"
-          hint="Fallo subito, prima di mandare il link ai clienti. Chi crea il codice è l'unico che vede le richieste."
+          hint="Il codice vale per info@mttravelservice.com. È l'unico accesso finché non ne aggiungi altri."
           submitLabel="Crea codice"
           confirm
           onSubmit={async (next) => {
             await claimStaff({ data: { pin: next } });
-            await openWith(next);
+            await openWith(OWNER_EMAIL, next);
           }}
         />
       ) : null}
       {phase === "locked" ? (
-        <PinForm
-          title="Entra in gestione"
-          hint={error || "Inserisci il codice che hai creato su questo servizio."}
-          submitLabel="Apri"
+        <LoginForm
+          hint={error || "Entra con una mail autorizzata e il suo codice. info@mttravelservice.com usa il codice che hai già."}
           onSubmit={openWith}
         />
       ) : null}
 
-      {phase === "ready" ? <AlertSettings pin={pin} /> : null}
-      {phase === "ready" ? <StaffQuote pin={pin} onSaved={(booking) => setBookings((current) => [booking, ...current])} /> : null}
+      {phase === "ready" ? <StaffAccess staffEmail={staffEmail} pin={pin} /> : null}
+      {phase === "ready" ? <AlertSettings staffEmail={staffEmail} pin={pin} /> : null}
+      {phase === "ready" ? <DiscountCodes staffEmail={staffEmail} pin={pin} /> : null}
+      {phase === "ready" ? <StaffQuote staffEmail={staffEmail} pin={pin} onSaved={(booking) => setBookings((current) => [booking, ...current])} /> : null}
 
       {phase === "ready" && bookings.length === 0 ? (
         <div className="mt-8 rounded-lg border border-border bg-surface p-5">
@@ -136,9 +168,9 @@ function RichiestePage() {
             const removing = pendingId === booking.id;
             const confirmed = booking.status === "confirmed";
             return (
-              <li key={booking.id} className="rounded-lg border border-border bg-surface p-4">
+              <li id={`richiesta-${booking.id}`} key={booking.id} className="scroll-mt-6 rounded-lg border border-border bg-surface p-4">
                 <div className="flex items-baseline justify-between gap-3">
-                  <p className="font-display text-2xl">{booking.code}</p>
+                  <p className="text-xl font-semibold">{booking.code}</p>
                   <p className={`text-sm ${confirmed ? "text-fg" : "text-primary"}`}>
                     {confirmed ? "Confermata" : booking.revised ? "Modificata · da riconfermare" : "Da confermare"}
                   </p>
@@ -150,14 +182,20 @@ function RichiestePage() {
                   {booking.trip.destination.label}
                 </p>
                 <p className="mt-1 text-sm text-muted">
-                  {VEHICLES[booking.trip.vehicle].name} · {peopleLabel(booking.trip.passengers)}
+                  {fleetLabel(tripFleet(booking.trip))} · {peopleLabel(booking.trip.passengers)}
                   {booking.trip.roundTrip ? " · A/R" : ""}
                   {" · "}
                   {paymentLabel(booking.paymentMethod)}
                 </p>
                 <div className="mt-3">
                   <p className="text-sm text-muted">Totale</p>
-                  <p className="font-display text-3xl tabular-nums">{euro(booking.quote.total)}</p>
+                  <p className="text-2xl font-semibold tabular-nums">{euro(booking.quote.total)}</p>
+                  {booking.quote.approachKm ? (
+                    <p className="text-sm text-muted">Km sede inseriti: {booking.quote.approachKm}. Il cliente vede solo l'asterisco.</p>
+                  ) : null}
+                  {booking.quote.remote ? (
+                    <p className="text-sm text-muted">Partenza e arrivo oltre 20 km dalla sede: il cliente vede l'asterisco e l'avviso sul vettore vicino.</p>
+                  ) : null}
                 </div>
                 <p className="mt-3">
                   {booking.customer.firstName} {booking.customer.lastName}
@@ -171,12 +209,23 @@ function RichiestePage() {
                     {booking.customer.email}
                   </a>
                 </p>
+                {editId === booking.id ? (
+                  <StaffEdit
+                    booking={booking}
+                    pin={pin}
+                    staffEmail={staffEmail}
+                    onClose={() => setEditId(null)}
+                    onSaved={(next) =>
+                      setBookings((current) => current.map((item) => (item.id === next.id ? next : item)))
+                    }
+                  />
+                ) : null}
                 {confirmId === booking.id ? (
                   <ConfirmPanel
                     booking={booking}
                     onClose={() => setConfirmId(null)}
                     onConfirm={async (patch) => {
-                      await confirmStaffBooking({ data: { pin, id: booking.id, ...patch } });
+                      await confirmStaffBooking({ data: { staffEmail, pin, id: booking.id, ...patch } });
                       setBookings((current) =>
                         current.map((item) =>
                           item.id === booking.id
@@ -199,14 +248,7 @@ function RichiestePage() {
                     onClick={() => setConfirmId(booking.id)}
                     className="inline-flex h-11 items-center rounded-md bg-primary px-4 text-sm font-medium text-primary-fg"
                   >
-                    {confirmed ? "Riapri conferma" : "Conferma"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setDriverId(booking.id)}
-                    className="inline-flex h-11 items-center rounded-md border border-border px-4 text-sm font-medium"
-                  >
-                    Altro autista
+                    {confirmed ? "Riapri conferma" : "Accetta"}
                   </button>
                   <button
                     type="button"
@@ -215,47 +257,72 @@ function RichiestePage() {
                   >
                     Rifiuta
                   </button>
-                  <a
-                    href={whatsappHref(text)}
-                    target="_blank"
-                    rel="noreferrer"
+                  <button
+                    type="button"
+                    onClick={() => setMoreId((current) => (current === booking.id ? null : booking.id))}
                     className="inline-flex h-11 items-center rounded-md border border-border px-4 text-sm font-medium"
                   >
-                    WhatsApp richiesta
-                  </a>
-                  <RequestActions booking={booking} />
-                  {removing ? (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          void removeStaffBooking({ data: { pin, id: booking.id } }).then(() => {
-                            setBookings((current) => current.filter((item) => item.id !== booking.id));
-                            setPendingId(null);
-                          });
-                        }}
-                        className="inline-flex h-11 items-center rounded-md border border-border px-4 text-sm"
-                      >
-                        Elimina
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setPendingId(null)}
-                        className="inline-flex h-11 items-center px-3 text-sm text-muted"
-                      >
-                        Annulla
-                      </button>
-                    </>
-                  ) : (
+                    {moreId === booking.id ? "Chiudi" : "Altro"}
+                  </button>
+                </div>
+                {moreId === booking.id ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
                     <button
                       type="button"
-                      onClick={() => setPendingId(booking.id)}
-                      className="inline-flex h-11 items-center rounded-md border border-border px-4 text-sm"
+                      onClick={() => setEditId(booking.id)}
+                      className="inline-flex h-11 items-center rounded-md border border-border px-4 text-sm font-medium"
                     >
-                      Rimuovi
+                      Modifica
                     </button>
-                  )}
-                </div>
+                    <button
+                      type="button"
+                      onClick={() => setDriverId(booking.id)}
+                      className="inline-flex h-11 items-center rounded-md border border-border px-4 text-sm font-medium"
+                    >
+                      Altro autista
+                    </button>
+                    <a
+                      href={whatsappHref(text)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex h-11 items-center rounded-md border border-border px-4 text-sm font-medium"
+                    >
+                      WhatsApp richiesta
+                    </a>
+                    <RequestActions booking={booking} />
+                    {removing ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void removeStaffBooking({ data: { staffEmail, pin, id: booking.id } }).then(() => {
+                              setBookings((current) => current.filter((item) => item.id !== booking.id));
+                              setPendingId(null);
+                            });
+                          }}
+                          className="inline-flex h-11 items-center rounded-md border border-border px-4 text-sm"
+                        >
+                          Elimina
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPendingId(null)}
+                          className="inline-flex h-11 items-center px-3 text-sm text-muted"
+                        >
+                          Annulla
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setPendingId(booking.id)}
+                        className="inline-flex h-11 items-center rounded-md border border-border px-4 text-sm"
+                      >
+                        Rimuovi
+                      </button>
+                    )}
+                  </div>
+                ) : null}
               </li>
             );
           })}
@@ -265,18 +332,72 @@ function RichiestePage() {
   );
 }
 
+function NoticeBell({ bookings }: { bookings: Booking[] }) {
+  const [open, setOpen] = useState(false);
+  const items = bookings.filter((booking) => booking.status !== "confirmed");
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-label="Richieste da vedere"
+        onClick={() => setOpen((value) => !value)}
+        className="relative inline-flex h-11 w-11 items-center justify-center rounded-md border border-border bg-surface"
+      >
+        <Bell className="h-5 w-5" />
+        {items.length > 0 ? (
+          <span className="absolute -right-1 -top-1 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1 text-xs font-medium text-primary-fg">
+            {items.length}
+          </span>
+        ) : null}
+      </button>
+      {open ? (
+        <div className="absolute right-0 z-20 mt-2 w-80 rounded-lg border border-border bg-surface p-2 shadow-lg">
+          {items.length === 0 ? (
+            <p className="px-2 py-3 text-sm text-muted">Nessuna richiesta nuova o modifica da accettare.</p>
+          ) : (
+            <ul>
+              {items.map((booking) => (
+                <li key={booking.id}>
+                  <button
+                    type="button"
+                    className="w-full rounded-md px-2 py-2 text-left hover:bg-bg"
+                    onClick={() => {
+                      setOpen(false);
+                      document.getElementById(`richiesta-${booking.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+                    }}
+                  >
+                    <p className="font-medium">{booking.code}</p>
+                    <p className="text-sm text-muted">
+                      {booking.revised ? "Modifica da accettare" : "Nuova richiesta"} · {booking.customer.firstName}{" "}
+                      {booking.customer.lastName}
+                    </p>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function PinForm({
   title,
   hint,
   submitLabel,
   confirm = false,
   onSubmit,
+  onError,
 }: {
   title: string;
   hint: string;
   submitLabel: string;
   confirm?: boolean;
   onSubmit: (pin: string) => Promise<void>;
+  onError?: (message: string) => void;
 }) {
   const [pin, setPin] = useState("");
   const [again, setAgain] = useState("");
@@ -300,7 +421,9 @@ function PinForm({
         setError("");
         void onSubmit(pin.trim())
           .catch((reason: unknown) => {
-            setError(reason instanceof Error ? reason.message : "Non riuscito.");
+            const message = reason instanceof Error ? reason.message : "Non riuscito.";
+            setError(message);
+            onError?.(message);
             setBusy(false);
           });
       }}
@@ -337,12 +460,66 @@ function PinForm({
   );
 }
 
+function LoginForm({ hint, onSubmit }: { hint: string; onSubmit: (email: string, pin: string) => Promise<void> }) {
+  const [email, setEmail] = useState(OWNER_EMAIL);
+  const [pin, setPin] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  return (
+    <form
+      className="mt-8 grid max-w-md gap-3 rounded-lg border border-border bg-surface p-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!email.includes("@") || pin.trim().length < 4) {
+          setError("Servono mail e codice, almeno 4 caratteri.");
+          return;
+        }
+        setBusy(true);
+        setError("");
+        void onSubmit(email.trim().toLowerCase(), pin.trim()).catch((reason: unknown) => {
+          setError(reason instanceof Error ? reason.message : "Accesso non riuscito.");
+          setBusy(false);
+        });
+      }}
+    >
+      <p className="font-medium">Entra in gestione</p>
+      <p className="text-sm text-muted">{hint}</p>
+      <input
+        type="email"
+        autoComplete="username"
+        value={email}
+        onChange={(event) => setEmail(event.target.value)}
+        placeholder="Mail"
+        className="h-12 rounded-md border border-border bg-bg px-3 text-base"
+      />
+      <input
+        type="password"
+        autoComplete="current-password"
+        value={pin}
+        onChange={(event) => setPin(event.target.value)}
+        placeholder="Codice"
+        className="h-12 rounded-md border border-border bg-bg px-3 text-base"
+      />
+      {error ? <p className="text-sm font-medium text-primary">{error}</p> : null}
+      <button
+        type="submit"
+        disabled={busy}
+        className="inline-flex h-12 items-center justify-center rounded-md bg-primary px-5 font-medium text-primary-fg disabled:opacity-50"
+      >
+        {busy ? "Attendi…" : "Apri"}
+      </button>
+    </form>
+  );
+}
+
 function DriverPanel({ booking, onClose }: { booking: Booking; onClose: () => void }) {
   const reduced = Math.round(booking.quote.total * 0.8 * 100) / 100;
   const [mode, setMode] = useState<"cut" | "custom">("cut");
   const [custom, setCustom] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [vat, setVat] = useState<VatChoice | "">("");
   const amount = mode === "cut" ? reduced : Number(custom.replace(",", "."));
 
   return (
@@ -368,6 +545,15 @@ function DriverPanel({ booking, onClose }: { booking: Booking; onClose: () => vo
           />
         ) : null}
       </div>
+      <p className="text-sm font-medium">Regime IVA da scrivere nel PDF. Il compenso non cambia.</p>
+      <label className="flex items-start gap-2 text-sm">
+        <input type="radio" className="mt-1" checked={vat === "zero"} onChange={() => setVat("zero")} />
+        <span>IVA 0%. Operazione senza applicazione dell'IVA ai sensi dell'art. 1, commi da 54 a 89, L. 190/2014 come modificato dalla L. 208/2015 e L. 145/2018.</span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input type="radio" className="mt-1" checked={vat === "ten"} onChange={() => setVat("ten")} />
+        <span>IVA 10% già inclusa nella cifra indicata.</span>
+      </label>
       {error ? <p className="text-sm font-medium text-primary">{error}</p> : null}
       <div className="flex flex-wrap gap-2">
         <button
@@ -378,9 +564,13 @@ function DriverPanel({ booking, onClose }: { booking: Booking; onClose: () => vo
               setError("Inserisci una cifra valida.");
               return;
             }
+            if (!vat) {
+              setError("Scegli il regime IVA del PDF.");
+              return;
+            }
             setError("");
             setBusy(true);
-            void downloadDriverPdf(booking, amount)
+            void downloadDriverPdf(booking, amount, vat)
               .catch(() => setError("Non riesco a creare il PDF. Riprova."))
               .finally(() => setBusy(false));
           }}

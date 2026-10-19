@@ -41,6 +41,7 @@ export function mountMap(el: HTMLElement) {
   const group = L.layerGroup().addTo(map);
   let lastFit = "";
   let onPick: ((lat: number, lon: number) => void) | null = null;
+  let userDot: { setLatLng: (point: [number, number]) => void } | null = null;
 
   map.on("click", (event: { latlng: { lat: number; lng: number } }) => {
     onPick?.(event.latlng.lat, event.latlng.lng);
@@ -54,6 +55,7 @@ export function mountMap(el: HTMLElement) {
         color: color || "#d4b483",
         weight: 4,
         opacity: 0.92,
+        interactive: false,
       }).addTo(group);
     }
     for (const pin of data.pins) {
@@ -64,7 +66,7 @@ export function mountMap(el: HTMLElement) {
         iconSize: [28, 28],
         iconAnchor: [14, 14],
       });
-      L.marker([pin.lat, pin.lon], { icon, title: pin.label, keyboard: false }).addTo(group);
+      L.marker([pin.lat, pin.lon], { icon, title: pin.label, keyboard: false, interactive: false }).addTo(group);
     }
 
     const signature = data.line.length
@@ -90,6 +92,23 @@ export function mountMap(el: HTMLElement) {
     update,
     setPick(handler: ((lat: number, lon: number) => void) | null) {
       onPick = handler;
+    },
+    centerOn(lat: number, lon: number) {
+      const point: [number, number] = [lat, lon];
+      if (!userDot) {
+        userDot = L.circleMarker(point, {
+          radius: 8,
+          color: "#1a140c",
+          weight: 2,
+          fillColor: "#e0c08a",
+          fillOpacity: 1,
+          interactive: false,
+        }).addTo(map);
+      } else {
+        userDot.setLatLng(point);
+      }
+      map.flyTo(point, 16, { duration: 0.45 });
+      map.invalidateSize();
     },
     destroy() {
       observer.disconnect();

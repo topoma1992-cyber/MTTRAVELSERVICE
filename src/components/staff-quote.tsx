@@ -3,19 +3,21 @@ import { PlaceInput } from "@/components/place-input";
 import { MapHost } from "@/components/map-host";
 import { createStaffQuote } from "@/lib/bookings.functions";
 import { makeBookingCode, PAYMENT_METHODS, type Booking, type PaymentMethod } from "@/lib/bookings";
-import { euro, formatDuration, kmLabel } from "@/lib/format";
-import { reversePlace, routeTrip } from "@/lib/geo";
+import { euro, formatDuration, kmLabel, legMeasure } from "@/lib/format";
+import { farFromBase, reversePlace, routeTrip } from "@/lib/geo";
 import { downloadBookingPdf } from "@/lib/pdf";
-import { buildQuote, VEHICLES, type Quote } from "@/lib/tariff";
+import { PdfExport } from "@/components/pdf-export";
+import { buildQuote, fleetLabel, serviceInBologna, VEHICLES, type Quote } from "@/lib/tariff";
 import type { Place, RouteResult, VehicleId } from "@/lib/types";
 
 const field = "h-12 w-full rounded-md border border-border bg-bg px-3 text-base";
 
 function chosenVehicle(values: FormState): VehicleId {
-  if (values.vehicle === "van" || values.vehicle === "car") return values.vehicle;
   const people = Number(values.passengers) || 1;
   const bags = Number(values.luggage) || 0;
-  return people > 3 || bags > 4 ? "van" : "car";
+  if (people > VEHICLES.car.passengers || bags > VEHICLES.car.bagsIncluded) return "van";
+  if (values.vehicle === "van" || values.vehicle === "car") return values.vehicle;
+  return "car";
 }
 
 function moneyInput(amount: number) {
@@ -59,7 +61,8 @@ function draftBooking(values: FormState, origin: Place | null, destination: Plac
       boosters: 0,
       meetGreet: false,
       pet: false,
-      waitMinutes: 0,
+      waitMinutes: Math.max(0, Number(values.waitMinutes) || 0),
+      vehicleStay: values.roundTrip && values.vehicleStay,
       flight: values.flight.trim(),
     },
     customer: {
@@ -81,6 +84,7 @@ function draftBooking(values: FormState, origin: Place | null, destination: Plac
           holiday: null,
           vehicle,
           sameDayChoice: null,
+          appliedWait: 0,
           discountCode: null,
         },
   };
@@ -95,6 +99,7 @@ type FormState = {
   returnDate: string;
   returnTime: string;
   roundTrip: boolean;
+  vehicleStay: boolean;
   passengers: string;
   luggage: string;
   oversizedNote: string;
@@ -107,6 +112,7 @@ type FormState = {
   notes: string;
   total: string;
   paymentMethod: PaymentMethod | "";
+  waitMinutes: string;
 };
 
 const empty: FormState = {
@@ -118,6 +124,7 @@ const empty: FormState = {
   returnDate: "",
   returnTime: "",
   roundTrip: false,
+  vehicleStay: false,
   passengers: "",
   luggage: "",
   oversizedNote: "",
@@ -130,12 +137,15 @@ const empty: FormState = {
   notes: "",
   total: "",
   paymentMethod: "",
+  waitMinutes: "",
 };
 
 export function StaffQuote({
+  staffEmail,
   pin,
   onSaved,
 }: {
+  staffEmail: string;
   pin: string;
   onSaved: (booking: Booking) => void;
 }) {
@@ -146,6 +156,8 @@ export function StaffQuote({
   const [route, setRoute] = useState<RouteResult | null>(null);
   const [priced, setPriced] = useState<Quote | null>(null);
   const [routing, setRouting] = useState(false);
+  const [approachKm, setApproachKm] = useState("");
+  const [remote, setRemote] = useState(false);
   const [manual, setManual] = useState(false);
   const [mapTarget, setMapTarget] = useState<"origin" | "destination" | null>(null);
   const [busy, setBusy] = useState(false);
@@ -178,6 +190,22 @@ export function StaffQuote({
   }, [originPlace, destinationPlace, values.roundTrip]);
 
   useEffect(() => {
+    if (!originPlace || !destinationPlace) {
+      setRemote(false);
+      return;
+    }
+    const controller = new AbortController();
+    void farFromBase(originPlace, destinationPlace, controller.signal)
+      .then((next) => {
+        if (!controller.signal.aborted) setRemote(next);
+      })
+      .catch((reason: unknown) => {
+        if (reason instanceof DOMException && reason.name === "AbortError") return;
+      });
+    return () => controller.abort();
+  }, [originPlace, destinationPlace]);
+
+  useEffect(() => {
     setManual(false);
   }, [
     originPlace,
@@ -190,6 +218,9 @@ export function StaffQuote({
     values.luggage,
     values.passengers,
     values.vehicle,
+    values.waitMinutes,
+    values.vehicleStay,
+    approachKm,
   ]);
 
   useEffect(() => {
@@ -209,14 +240,20 @@ export function StaffQuote({
       time: values.time,
       returnDate: values.returnDate,
       returnTime: values.returnTime,
+      vehicleStay: values.roundTrip && values.vehicleStay,
       luggage,
       childSeats: 0,
       boosters: 0,
       meetGreet: false,
       pet: false,
-      waitMinutes: 0,
+      waitMinutes: Math.max(0, Number(values.waitMinutes) || 0),
+      waitManual: true,
       stopCount: 0,
       discountCode: "",
+      passengers: Math.min(16, Math.max(1, Number(values.passengers) || 1)),
+      approachKm: Math.max(0, Number(approachKm.replace(",", ".")) || 0),
+      remote,
+      bologna: serviceInBologna([originPlace, destinationPlace]),
     });
     setPriced(next);
     if (!manual) {
@@ -232,6 +269,10 @@ export function StaffQuote({
     values.time,
     values.returnDate,
     values.returnTime,
+    values.waitMinutes,
+    values.vehicleStay,
+    approachKm,
+    remote,
   ]);
 
   function set<K extends keyof FormState>(key: K, value: FormState[K]) {
@@ -244,6 +285,7 @@ export function StaffQuote({
     try {
       const booking = await createStaffQuote({
         data: {
+          staffEmail,
           pin,
           origin: originPlace?.label ?? "",
           destination: destinationPlace?.label ?? "",
@@ -256,6 +298,7 @@ export function StaffQuote({
           returnDate: values.returnDate,
           returnTime: values.returnTime,
           roundTrip: values.roundTrip,
+          vehicleStay: values.roundTrip && values.vehicleStay,
           passengers: Number(values.passengers) || 0,
           luggage,
           oversizedNote: values.oversizedNote,
@@ -267,9 +310,13 @@ export function StaffQuote({
           email: values.email,
           notes: values.notes,
           total: parseMoney(values.total),
+          waitMinutes: Math.max(0, Number(values.waitMinutes) || 0),
           km: priced?.km ?? 0,
           minutes: priced?.minutes ?? 0,
           estimated: priced?.estimated ?? false,
+          approachKm: priced?.approachKm ?? 0,
+          approachAmount: priced?.approachAmount ?? 0,
+          remote: priced?.remote ?? false,
           lines:
             priced && Math.abs(priced.total - parseMoney(values.total)) < 0.05
               ? priced.lines
@@ -284,6 +331,8 @@ export function StaffQuote({
       setOriginPlace(null);
       setDestinationPlace(null);
       setPriced(null);
+      setApproachKm("");
+      setRemote(false);
       setManual(false);
       setFormKey((current) => current + 1);
       setMapTarget(null);
@@ -298,7 +347,7 @@ export function StaffQuote({
   return (
     <section className="mt-6 rounded-lg border border-border bg-surface p-4">
       <div className="flex items-center justify-between gap-3">
-        <h2 className="font-display text-2xl">Nuovo preventivo</h2>
+        <h2 className="text-lg">Nuovo preventivo</h2>
         <button
           type="button"
           onClick={() => setOpen((value) => !value)}
@@ -323,22 +372,19 @@ export function StaffQuote({
                   line: route?.line ?? [],
                 }}
                 picking={Boolean(mapTarget)}
-                onPick={
-                  mapTarget
-                    ? (lat, lon) => {
-                        const target = mapTarget;
-                        setMapTarget(null);
-                        void reversePlace(lat, lon).then((found) => {
-                          if (target === "origin") setOriginPlace(found);
-                          else setDestinationPlace(found);
-                        });
-                      }
-                    : undefined
-                }
+                scrollSignal={mapTarget ?? ""}
+                onPick={(lat, lon) => {
+                  const target = mapTarget ?? (!originPlace ? "origin" : "destination");
+                  setMapTarget(null);
+                  const rough = { label: `${lat.toFixed(5)}, ${lon.toFixed(5)}`, lat, lon };
+                  if (target === "origin") setOriginPlace(rough);
+                  else setDestinationPlace(rough);
+                  void reversePlace(lat, lon).then((found) => {
+                    if (target === "origin") setOriginPlace(found);
+                    else setDestinationPlace(found);
+                  });
+                }}
               />
-              <p className="pointer-events-none absolute bottom-8 left-3 max-w-xs rounded-md bg-surface/95 px-3 py-2 text-sm text-muted">
-                {mapTarget ? "Tocca la mappa per fissare il punto." : "Puoi cercare l'indirizzo o toccare Sulla mappa."}
-              </p>
             </div>
             <PlaceInput
               key={`${formKey}-from`}
@@ -370,10 +416,30 @@ export function StaffQuote({
               <input
                 type="checkbox"
                 checked={values.roundTrip}
-                onChange={(event) => set("roundTrip", event.target.checked)}
+                onChange={(event) => {
+                  const checked = event.target.checked;
+                  set("roundTrip", checked);
+                  if (!checked) set("vehicleStay", false);
+                }}
               />
               Andata e ritorno
             </label>
+            {values.roundTrip ? (
+              <label className="flex items-start gap-2 text-sm sm:col-span-2">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={values.vehicleStay}
+                  onChange={(event) => set("vehicleStay", event.target.checked)}
+                />
+                <span>
+                  Veicolo a disposizione in attesa
+                  <span className="mt-1 block text-muted">
+                    Un solo transfer andata e ritorno, più tutte le ore di attesa indicate sotto.
+                  </span>
+                </span>
+              </label>
+            ) : null}
             {values.roundTrip ? (
               <>
                 <label className="grid gap-1 text-sm">
@@ -396,6 +462,16 @@ export function StaffQuote({
                 </label>
               </>
             ) : null}
+            <label className="grid gap-1 text-sm">
+              Attesa, minuti
+              <input
+                inputMode="numeric"
+                value={values.waitMinutes}
+                placeholder="0"
+                onChange={(event) => set("waitMinutes", event.target.value)}
+                className={field}
+              />
+            </label>
             <label className="grid gap-1 text-sm">
               Passeggeri
               <input
@@ -452,6 +528,17 @@ export function StaffQuote({
               <input value={values.email} onChange={(event) => set("email", event.target.value)} className={field} />
             </label>
             <label className="grid gap-1 text-sm sm:col-span-2">
+              Km aggiuntivi dalla sede
+              <input
+                inputMode="decimal"
+                value={approachKm}
+                placeholder="0"
+                onChange={(event) => setApproachKm(event.target.value)}
+                className={field}
+              />
+              <span className="text-muted">Solo a mano. 0,50 €/km nel totale. Il cliente vede l'asterisco, non questi km.</span>
+            </label>
+            <label className="grid gap-1 text-sm sm:col-span-2">
               <span className="font-medium">Prezzo</span>
               <input
                 inputMode="decimal"
@@ -467,11 +554,19 @@ export function StaffQuote({
                 {routing
                   ? "Calcolo il percorso…"
                   : priced
-                    ? `${kmLabel(priced.km)} · ${formatDuration(priced.minutes)}${priced.estimated ? " · stima" : ""} · ${VEHICLES[vehicle].name}. Puoi cambiare la cifra.`
+                    ? priced.legs && priced.legs.length > 1
+                      ? `${priced.legs.map((leg) => `${leg.label} ${legMeasure(leg.km, leg.minutes, priced.estimated)}`).join(" · ")}. Puoi cambiare la cifra.`
+                      : `${kmLabel(priced.km)} · ${formatDuration(priced.minutes)}${priced.estimated ? " · stima" : ""} · ${priced.fleet ? fleetLabel(priced.fleet) : VEHICLES[vehicle].name}. Puoi cambiare la cifra.`
                     : "Scegli partenza e arrivo: il prezzo compare qui e puoi modificarlo."}
               </span>
               {priced ? (
                 <span className="grid gap-1">
+                  {priced.approachAmount ? (
+                    <span className="text-sm text-muted">Km sede nel totale: {euro(priced.approachAmount)}. Al cliente solo l'asterisco.</span>
+                  ) : null}
+                  {priced.remote ? (
+                    <span className="text-sm text-muted">Partenza e arrivo oltre 20 km dalla sede: il cliente vede l'asterisco e l'avviso sul vettore vicino.</span>
+                  ) : null}
                   {priced.lines.map((line) => (
                     <span key={line.label} className="flex justify-between gap-3 text-sm text-muted">
                       <span>{line.label}</span>
@@ -528,17 +623,10 @@ export function StaffQuote({
             >
               {busy ? "Salvo…" : "Salva in richieste"}
             </button>
-            <button
-              type="button"
-              onClick={() => {
-                void downloadBookingPdf(draftBooking(values, originPlace, destinationPlace, priced)).catch(() =>
-                  setError("Non riesco a creare il PDF."),
-                );
-              }}
-              className="inline-flex h-11 items-center rounded-md border border-border px-4 text-sm font-medium"
-            >
-              Scarica PDF
-            </button>
+            <PdfExport
+              label="PDF cliente"
+              onExport={(vat) => downloadBookingPdf(draftBooking(values, originPlace, destinationPlace, priced), vat)}
+            />
           </div>
         </div>
       ) : null}

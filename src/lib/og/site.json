@@ -1,5 +1,7 @@
 {
   "title": "MT TRAVEL SERVICE",
+  "description": "Prenotazione transfer con conducente. Auto fino a 4 passeggeri, van fino a 8.",
   "card": "custom",
-  "color": "101412"
+  "color": "101412",
+  "creator": false
 }

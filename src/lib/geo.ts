@@ -67,6 +67,16 @@ const SEARCH_STOP = new Set([
   "al",
 ]);
 
+function expandQuery(query: string) {
+  return query
+    .replace(/\bp\.zza\b/gi, "piazza")
+    .replace(/\bp\.le\b/gi, "piazzale")
+    .replace(/\bv\.le\b/gi, "viale")
+    .replace(/\bc\.so\b/gi, "corso")
+    .replace(/\bloc\.\b/gi, "località")
+    .replace(/\bv\.(?=\s)/gi, "via ");
+}
+
 function fold(value: string) {
   return value
     .toLowerCase()
@@ -81,26 +91,6 @@ function queryTokens(query: string) {
 }
 
 type Hit = Place & { city: string; street: string; house: string; name: string };
-
-type AddressQuery = { street: string; number: string; city: string };
-
-function parseAddress(query: string): AddressQuery | null {
-  const cleaned = query.replace(/[,.]/g, " ").replace(/\s+/g, " ").trim();
-  const num = cleaned.match(/\b(\d+[a-zA-Z]?)\b/);
-  if (!num?.[1]) return null;
-  const number = num[1];
-  const rest = cleaned.replace(num[0], " ").replace(/\s+/g, " ").trim();
-  if (rest.length < 3) return null;
-  const parts = rest.split(" ");
-  const hasStreet = /^(via|viale|piazza|piazzale|corso|largo|strada|vicolo|contrada)\b/i.test(rest);
-  if (hasStreet && parts.length >= 3) {
-    return { street: parts.slice(0, -1).join(" "), number, city: parts[parts.length - 1] ?? "" };
-  }
-  if (!hasStreet && parts.length >= 2) {
-    return { street: parts.slice(0, -1).join(" "), number, city: parts[parts.length - 1] ?? "" };
-  }
-  return { street: rest, number, city: "" };
-}
 
 type NominatimHit = {
   lat?: string;
@@ -119,33 +109,37 @@ type NominatimHit = {
   };
 };
 
+function wordHit(text: string, token: string) {
+  return fold(text)
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+    .some((word) => word === token || (token.length >= 4 && word.startsWith(token) && word.length <= token.length + 1));
+}
+
 function rankHit(hit: Hit, query: string) {
   const tokens = queryTokens(query).filter((token) => !/^\d+$/.test(token));
-  const label = fold(hit.label);
-  const city = fold(hit.city);
-  const name = fold(hit.name);
   const number = query.match(/\b(\d+[a-z]?)\b/i)?.[1]?.toLowerCase() ?? "";
   let score = 0;
   let streetHits = 0;
   let nameHits = 0;
   for (const token of tokens) {
-    if (name.includes(token) && token !== city) {
-      score += 14;
+    if (wordHit(hit.name, token)) {
+      score += 16;
       nameHits += 1;
-    } else if (fold(hit.street).includes(token)) {
-      score += 12;
+    } else if (wordHit(hit.street, token)) {
+      score += 14;
       streetHits += 1;
-    } else if (city === token || city.startsWith(token)) score += 5;
-    else if (label.includes(token)) score += 4;
+    } else if (wordHit(hit.city, token)) score += 8;
+    else if (wordHit(hit.label, token)) score += 4;
+    else return { score: -1, streetHits: 0, exactHouse: false };
   }
   const house = fold(hit.house);
   const exactHouse = Boolean(number) && house === number;
   if (number && exactHouse) score += 40;
-  else if (number && house && house !== number) score -= 25;
-  const unmatched = tokens.filter(
-    (token) => !name.includes(token) && !fold(hit.street).includes(token) && city !== token && !city.startsWith(token),
-  );
-  if (unmatched.length > 0 && streetHits === 0 && nameHits === 0) score -= 6;
+  else if (number && house && house !== number) score -= 30;
+  const foldedQuery = fold(query).replace(/[^a-z0-9]+/g, " ").trim();
+  const foldedName = fold(hit.name);
+  if (foldedName && foldedQuery.length >= 3 && (foldedName === foldedQuery || foldedName.startsWith(foldedQuery))) score += 24;
   return { score, streetHits: streetHits + nameHits, exactHouse };
 }
 
@@ -187,22 +181,6 @@ async function nominatimSearch(
   return data.map(fromNominatim).filter((place): place is Hit => Boolean(place));
 }
 
-async function nominatimHouse(parsed: AddressQuery, signal: AbortSignal) {
-  const url = new URL("https://nominatim.openstreetmap.org/search");
-  url.searchParams.set("street", `${parsed.number} ${parsed.street}`);
-  if (parsed.city) url.searchParams.set("city", parsed.city);
-  url.searchParams.set("country", "Italia");
-  url.searchParams.set("format", "jsonv2");
-  url.searchParams.set("addressdetails", "1");
-  url.searchParams.set("accept-language", "it");
-  url.searchParams.set("countrycodes", "it");
-  url.searchParams.set("limit", "5");
-  const res = await fetch(url, { signal, headers: { "Accept-Language": "it" } });
-  if (!res.ok) throw new Error("nominatim");
-  const data = (await res.json()) as NominatimHit[];
-  return data.map(fromNominatim).filter((place): place is Hit => Boolean(place));
-}
-
 function knownPlaces(query: string): Hit[] {
   const compact = fold(query).replace(/[^a-z0-9]+/g, "");
   const aliases = ["mttravel", "mttravelservice", "mttransport", "mariotopo"];
@@ -220,56 +198,47 @@ function knownPlaces(query: string): Hit[] {
   ];
 }
 
-async function esriSearch(query: string, signal: AbortSignal): Promise<Hit[]> {
-  const suggest = new URL("https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/suggest");
-  suggest.searchParams.set("f", "json");
-  suggest.searchParams.set("text", query);
-  suggest.searchParams.set("countryCode", "ITA");
-  suggest.searchParams.set("maxSuggestions", "6");
-  suggest.searchParams.set("location", `${MAP_CENTER.lon},${MAP_CENTER.lat}`);
-  const listed = await fetch(suggest, { signal });
-  if (!listed.ok) throw new Error("esri");
-  const data = (await listed.json()) as { suggestions?: Array<{ text?: string; magicKey?: string }> };
-  const suggestions = (data.suggestions ?? []).filter((item) => item.text && item.magicKey).slice(0, 5);
-  const resolved = await Promise.all(
-    suggestions.map(async (item) => {
-      const url = new URL("https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates");
-      url.searchParams.set("f", "json");
-      url.searchParams.set("magicKey", item.magicKey ?? "");
-      url.searchParams.set("singleLine", item.text ?? "");
-      url.searchParams.set("maxLocations", "1");
-      url.searchParams.set("outFields", "PlaceName,Place_addr,City,StAddr");
-      const res = await fetch(url, { signal });
-      if (!res.ok) return null;
-      const body = (await res.json()) as {
-        candidates?: Array<{
-          location?: { x?: number; y?: number };
-          attributes?: { PlaceName?: string; Place_addr?: string; City?: string; StAddr?: string };
-        }>;
-      };
-      const candidate = body.candidates?.[0];
-      const lat = candidate?.location?.y;
-      const lon = candidate?.location?.x;
-      if (typeof lat !== "number" || typeof lon !== "number") return null;
-      const attrs = candidate?.attributes ?? {};
-      const name = attrs.PlaceName || item.text?.split(",")[0] || "";
-      const city = attrs.City || "";
-      const street = attrs.StAddr || "";
-      const house = street.match(/\b(\d+[a-zA-Z]?)\b/)?.[1] ?? "";
-      const addr = (attrs.Place_addr || item.text || "").replace(/, ITA$/, "");
-      const head = name && addr && !addr.toLowerCase().startsWith(name.toLowerCase()) ? `${name}, ${addr}` : addr || name;
-      const label = head.replace(/, ITA$/, "");
-      const hit: Hit = { label, lat, lon, city, street, house, name };
-      return hit;
-    }),
-  );
-  return resolved.filter((place): place is Hit => Boolean(place));
+async function esriCandidates(query: string, signal: AbortSignal): Promise<Hit[]> {
+  const url = new URL("https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates");
+  url.searchParams.set("f", "json");
+  url.searchParams.set("singleLine", query);
+  url.searchParams.set("countryCode", "ITA");
+  url.searchParams.set("langCode", "IT");
+  url.searchParams.set("maxLocations", "8");
+  url.searchParams.set("outFields", "PlaceName,Place_addr,City,StAddr,Addr_type");
+  url.searchParams.set("location", `${MAP_CENTER.lon},${MAP_CENTER.lat}`);
+  url.searchParams.set("searchExtent", "6.6,36.6,18.8,47.1");
+  const res = await fetch(url, { signal });
+  if (!res.ok) throw new Error("esri");
+  const data = (await res.json()) as {
+    candidates?: Array<{
+      location?: { x?: number; y?: number };
+      attributes?: { PlaceName?: string; Place_addr?: string; City?: string; StAddr?: string; Addr_type?: string };
+    }>;
+  };
+  const places: Hit[] = [];
+  for (const candidate of data.candidates ?? []) {
+    const lat = candidate.location?.y;
+    const lon = candidate.location?.x;
+    if (typeof lat !== "number" || typeof lon !== "number") continue;
+    const attrs = candidate.attributes ?? {};
+    const city = attrs.City || "";
+    const street = attrs.StAddr || "";
+    const house = street.match(/\b(\d+[a-zA-Z]?)\b/)?.[1] ?? "";
+    const poi = attrs.Addr_type === "POI" || attrs.Addr_type === "Locality";
+    const name = poi || attrs.PlaceName ? attrs.PlaceName || "" : "";
+    const addr = (attrs.Place_addr || street || "").replace(/,?\s*ITA$/, "");
+    const head = name && addr && !addr.toLowerCase().includes(name.toLowerCase()) ? `${name}, ${addr}` : addr || name;
+    places.push({ label: head.replace(/,?\s*ITA$/, ""), lat, lon, city, street, house, name });
+  }
+  return places;
 }
 
 async function photonSearch(query: string, signal: AbortSignal, lat?: number, lon?: number) {
   const url = new URL("https://photon.komoot.io/api/");
   url.searchParams.set("q", query);
-  url.searchParams.set("limit", "8");
+  url.searchParams.set("limit", "6");
+  url.searchParams.set("lang", "it");
   url.searchParams.set("bbox", "6.6,36.6,18.8,47.1");
   if (lat !== undefined && lon !== undefined) {
     url.searchParams.set("lat", String(lat));
@@ -302,7 +271,7 @@ function collect(hits: Hit[], query: string) {
     if (seen.has(key)) continue;
     seen.add(key);
     const { score, streetHits, exactHouse } = rankHit(hit, query);
-    if (score < 4) continue;
+    if (score < 8) continue;
     ranked.push({
       place: {
         label: hit.label,
@@ -320,44 +289,63 @@ function collect(hits: Hit[], query: string) {
   return ranked;
 }
 
+const searchCache = new Map<string, Place[]>();
+
+function capped<T>(work: Promise<T>, ms: number, fallback: T, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), ms);
+    const stop = (value: T) => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      resolve(value);
+    };
+    const onAbort = () => stop(fallback);
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (value) => stop(value),
+      () => stop(fallback),
+    );
+  });
+}
+
+function publish(ranked: Array<{ place: Place; exactHouse: boolean }>, streetLike: boolean) {
+  const exact = streetLike ? ranked.filter((item) => item.exactHouse) : [];
+  return (exact.length > 0 ? exact : ranked).slice(0, 8).map((item) => item.place);
+}
+
 export async function searchPlaces(query: string, signal: AbortSignal): Promise<Place[]> {
-  const streetLike = /^(via|viale|piazza|piazzale|corso|largo|strada|vicolo|contrada)\b/i.test(query.trim());
-  const parsed = streetLike ? parseAddress(query) : null;
-  const [addresses, places, localPhoton, widePhoton, houses, esri] = await Promise.all([
-    nominatimSearch(query, signal).catch(() => [] as Hit[]),
-    nominatimSearch(query, signal, { layer: "poi" }).catch(() => [] as Hit[]),
-    photonSearch(query, signal, MAP_CENTER.lat, MAP_CENTER.lon).catch(() => [] as Hit[]),
-    photonSearch(query, signal).catch(() => [] as Hit[]),
-    parsed ? nominatimHouse(parsed, signal).catch(() => [] as Hit[]) : Promise.resolve([] as Hit[]),
-    esriSearch(query, signal).catch(() => [] as Hit[]),
+  const text = expandQuery(query).replace(/\s+/g, " ").trim();
+  const cacheKey = fold(text);
+  const cached = searchCache.get(cacheKey);
+  if (cached) return cached;
+
+  const streetLike = /^(via|viale|piazza|piazzale|corso|largo|strada|vicolo|contrada|località)\b/i.test(text);
+  const remember = (list: Place[]) => {
+    if (list.length === 0) return list;
+    searchCache.set(cacheKey, list);
+    if (searchCache.size > 80) searchCache.delete(searchCache.keys().next().value ?? cacheKey);
+    return list;
+  };
+
+  const [esri, photon] = await Promise.all([
+    capped(esriCandidates(text, signal), 900, [] as Hit[], signal),
+    capped(photonSearch(text, signal, MAP_CENTER.lat, MAP_CENTER.lon), 900, [] as Hit[], signal),
   ]);
   if (signal.aborted) return [];
-  let hits = [...knownPlaces(query), ...esri, ...houses, ...places, ...addresses, ...localPhoton, ...widePhoton];
-  let ranked = collect(hits, query);
-  const found = ranked.some((item) => item.streetHits > 0);
-  const parts = query.trim().split(/\s+/).filter((part) => part.length > 2 && !/^\d+$/.test(part));
-  if (!found && parts.length >= 2) {
-    const localityName = parts[parts.length - 1] ?? "";
-    const escaped = localityName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const streetQuery = query.replace(new RegExp(`\\b${escaped}\\b`, "i"), "").replace(/\s+/g, " ").trim();
-    const locality = await nominatimSearch(localityName, signal, { limit: 1 }).catch(() => [] as Hit[]);
-    const city = locality[0];
-    if (city && streetQuery.length > 2) {
-      const span = 0.35;
-      const viewbox = `${city.lon - span},${city.lat + span},${city.lon + span},${city.lat - span}`;
-      const [nearAddress, nearPlaces, nearPhoton] = await Promise.all([
-        nominatimSearch(streetQuery, signal, { viewbox, bounded: true, limit: 6 }).catch(() => [] as Hit[]),
-        nominatimSearch(streetQuery, signal, { viewbox, bounded: true, limit: 6, layer: "poi" }).catch(() => [] as Hit[]),
-        photonSearch(streetQuery, signal, city.lat, city.lon).catch(() => [] as Hit[]),
-      ]);
-      hits = [...nearPlaces, ...nearAddress, ...nearPhoton, ...hits];
-      ranked = collect(hits, query);
-    }
-  }
-  const exact = streetLike ? ranked.filter((item) => item.exactHouse) : [];
-  const list = (exact.length > 0 ? exact : ranked).slice(0, 8).map((item) => item.place);
-  if (list.length === 0 && hits.length === 0) throw new Error("geocode");
-  return list;
+
+  const quick = publish(collect([...knownPlaces(text), ...esri, ...photon], text), streetLike);
+  if (quick.length > 0) return remember(quick);
+
+  const extra = await capped(
+    nominatimSearch(text, signal, { layer: "address,poi,railway", limit: 5 }),
+    900,
+    [] as Hit[],
+    signal,
+  );
+  if (signal.aborted) return [];
+  const list = publish(collect([...knownPlaces(text), ...esri, ...photon, ...extra], text), streetLike);
+  if (list.length === 0 && esri.length === 0 && photon.length === 0 && extra.length === 0) throw new Error("geocode");
+  return remember(list);
 }
 
 export async function reversePlace(lat: number, lon: number): Promise<Place> {
@@ -466,4 +454,30 @@ export async function routeTrip(
     line: [...outbound.line, ...inbound.line],
     estimated: outbound.estimated || inbound.estimated,
   };
+}
+
+export const BASE_POINT = { lat: 44.11676, lon: 12.34566 };
+export const REMOTE_KM = 20;
+
+const baseKmCache = new Map<string, number>();
+
+async function kmFromBase(point: { lat: number; lon: number }, signal?: AbortSignal) {
+  const key = `${point.lat.toFixed(3)},${point.lon.toFixed(3)}`;
+  const hit = baseKmCache.get(key);
+  if (hit !== undefined) return hit;
+  const route = await fetchRoute([BASE_POINT, point], signal ?? new AbortController().signal);
+  const km = Math.round(route.km * 10) / 10;
+  baseKmCache.set(key, km);
+  return km;
+}
+
+/** Vero solo se partenza e arrivo sono entrambi oltre 20 km dalla sede. */
+export async function farFromBase(
+  origin: { lat: number; lon: number },
+  destination: { lat: number; lon: number },
+  signal?: AbortSignal,
+) {
+  if (!origin.lat || !origin.lon || !destination.lat || !destination.lon) return false;
+  const [fromStart, fromEnd] = await Promise.all([kmFromBase(origin, signal), kmFromBase(destination, signal)]);
+  return fromStart > REMOTE_KM && fromEnd > REMOTE_KM;
 }

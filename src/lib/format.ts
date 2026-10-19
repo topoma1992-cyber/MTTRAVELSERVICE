@@ -12,6 +12,17 @@ export function euro(amount: number) {
   }).format(amount);
 }
 
+export function customerPrice(amount: number, marked = false) {
+  return `${euro(amount)}${marked ? "*" : ""}`;
+}
+
+export function priceMarked(quote: { approachAmount?: number; approachKm?: number; remote?: boolean } | null | undefined) {
+  return (quote?.approachAmount ?? 0) > 0 || (quote?.approachKm ?? 0) > 0 || quote?.remote === true;
+}
+
+export const REMOTE_NOTICE =
+  "Il transfer è distante dalla nostra sede. MT TRAVEL SERVICE si impegna a trovare un vettore NCC vicino a voi per garantirvi la tariffa mostrata.";
+
 export function kmLabel(km: number) {
   const formatted = new Intl.NumberFormat("it-IT", {
     minimumFractionDigits: 1,
@@ -27,6 +38,10 @@ export function formatDuration(minutes: number) {
   if (hours === 0) return `${total} min`;
   if (rest === 0) return `${hours} h`;
   return `${hours} h ${rest} min`;
+}
+
+export function legMeasure(km: number, minutes: number, estimated = false) {
+  return `${kmLabel(km)} · ${formatDuration(minutes)}${estimated ? " (stima)" : ""}`;
 }
 
 export function tripStartMs(date: string, time: string) {
@@ -100,13 +115,15 @@ export function paymentDueLine(date: string, time: string, now = new Date()) {
 }
 
 export function paymentNotice(date: string, time: string, now = new Date()) {
-  const rule = "Il pagamento va effettuato almeno 48 ore prima del viaggio.";
-  const urgent =
-    "Se mancano meno di 48 ore, la prenotazione si conferma con link di pagamento, bonifico istantaneo, Satispay o a rate.";
-  if (!date || !time) return `${rule} ${urgent}`;
+  const line =
+    "Paghi con link, bonifico istantaneo, Satispay o 4 rate Scalapay almeno 48 ore prima del viaggio, oppure subito alla conferma se mancano meno di 48 ore.";
+  if (!date || !time) return line;
   const [year, month, day] = date.split("-").map(Number);
   const [hour, minute] = time.split(":").map(Number);
   const start = new Date(year || 1970, (month || 1) - 1, day || 1, hour || 0, minute || 0);
-  const soon = start.getTime() - now.getTime() < 48 * 60 * 60 * 1000;
-  return soon ? `${urgent} ${rule}` : `${rule} ${urgent}`;
+  if (Number.isNaN(start.getTime())) return line;
+  if (start.getTime() - now.getTime() < 48 * 60 * 60 * 1000) {
+    return "Mancano meno di 48 ore: paghi subito alla conferma, con link, bonifico istantaneo, Satispay o 4 rate Scalapay.";
+  }
+  return line;
 }

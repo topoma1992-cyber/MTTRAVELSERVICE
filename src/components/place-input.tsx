@@ -84,7 +84,7 @@ export function PlaceInput({
             setSearched(true);
           }
         });
-    }, 320);
+    }, 120);
     return () => {
       window.clearTimeout(timer);
       controller.abort();

@@ -1,7 +1,7 @@
 import type { Sql } from "@/lib/db";
 import { BANK, paymentLabel, type Booking } from "@/lib/bookings";
-import { euro, formatWhen } from "@/lib/format";
-import { VEHICLES } from "@/lib/tariff";
+import { customerPrice, formatWhen, priceMarked, REMOTE_NOTICE } from "@/lib/format";
+import { fleetLabel, tripFleet } from "@/lib/tariff";
 
 const FROM_NAME = "MT TRAVEL SERVICE";
 
@@ -64,8 +64,11 @@ function tripLines(booking: Booking) {
     `${customer.firstName} ${customer.lastName}`.trim(),
     `${trip.origin.label} → ${trip.destination.label}`,
     formatWhen(trip.date, trip.time),
-    `${VEHICLES[trip.vehicle].name} · ${trip.passengers} passeggeri`,
-    `Totale ${euro(quote.total)} · ${paymentLabel(booking.paymentMethod)}`,
+    quote.legs && quote.legs.length > 1
+      ? quote.legs.map((leg) => `${leg.label} ${leg.km.toFixed(1)} km`).join(" · ")
+      : "",
+    `${fleetLabel(tripFleet(trip))} · ${trip.passengers} passeggeri`,
+    `Totale ${customerPrice(quote.total, priceMarked(quote))} · ${paymentLabel(booking.paymentMethod)}`,
     trip.flight ? `Volo ${trip.flight}` : "",
   ].filter(Boolean);
 }
@@ -82,6 +85,7 @@ export function customerMail(booking: Booking, viewUrl: string, editUrl: string)
     `Modifica: ${editUrl}`,
     "",
     "Non paghi ora. MT TRAVEL SERVICE ti risponde con la conferma e le istruzioni di pagamento.",
+    booking.quote.remote ? REMOTE_NOTICE : "",
     "Puoi modificare la richiesta dal link solo fino a 48 ore prima del viaggio.",
     "Se modifichi una richiesta già confermata, torna da confermare.",
     "",
@@ -97,11 +101,37 @@ export function customerMail(booking: Booking, viewUrl: string, editUrl: string)
         <a href="${escapeHtml(editUrl)}" style="display:inline-block;padding:12px 16px;background:#d4b483;color:#101412;text-decoration:none">Modifica</a>
       </p>
       <p>Non paghi ora. Ti rispondiamo con la conferma e le istruzioni per pagare con il metodo scelto.</p>
+      ${booking.quote.remote ? `<p>${escapeHtml(REMOTE_NOTICE)}</p>` : ""}
       <p>Puoi modificare la richiesta dal pulsante solo fino a 48 ore prima del viaggio.</p>
       <p>Se modifichi una richiesta già confermata, torna da confermare.</p>
       <p>${FROM_NAME}<br>${BANK.holder}</p>
     </div>`;
   return { subject: `Richiesta ricevuta ${booking.code}`, text, html };
+}
+
+export function staffChangeMail(booking: Booking, viewUrl: string) {
+  const lines = tripLines(booking);
+  const text = [
+    `Ciao ${booking.customer.firstName},`,
+    "",
+    `MT TRAVEL SERVICE ha aggiornato il preventivo ${booking.code}.`,
+    ...lines,
+    "",
+    `Vedi la richiesta aggiornata: ${viewUrl}`,
+    booking.quote.remote ? REMOTE_NOTICE : "",
+    "",
+    FROM_NAME,
+  ].join("\n");
+  const html = `
+    <div style="font-family:sans-serif;color:#101412;line-height:1.45">
+      <p>Ciao ${escapeHtml(booking.customer.firstName)},</p>
+      <p>MT TRAVEL SERVICE ha aggiornato il preventivo <strong>${escapeHtml(booking.code)}</strong>.</p>
+      <p>${lines.map(escapeHtml).join("<br>")}</p>
+      <p><a href="${escapeHtml(viewUrl)}" style="display:inline-block;padding:12px 16px;background:#101412;color:#f4f0e6;text-decoration:none">Vedi la richiesta</a></p>
+      ${booking.quote.remote ? `<p>${escapeHtml(REMOTE_NOTICE)}</p>` : ""}
+      <p>${FROM_NAME}</p>
+    </div>`;
+  return { subject: `Preventivo aggiornato ${booking.code}`, text, html };
 }
 
 export function ownerMail(booking: Booking, viewUrl: string, kind: "nuova" | "modificata") {

@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { PlaceInput } from "@/components/place-input";
-import { getPublicBooking, updatePublicBooking } from "@/lib/bookings.functions";
+import { getPublicBooking, lookupDiscount, updatePublicBooking } from "@/lib/bookings.functions";
 import { paymentLabel, type Booking } from "@/lib/bookings";
-import { customerCanEdit, euro, formatWhen, peopleLabel } from "@/lib/format";
-import { routeTrip } from "@/lib/geo";
-import { buildQuote, VEHICLES } from "@/lib/tariff";
+import { customerPrice, customerCanEdit, formatWhen, peopleLabel, priceMarked, REMOTE_NOTICE } from "@/lib/format";
+import { farFromBase, routeTrip } from "@/lib/geo";
+import { buildQuote, findDiscount, fleetForPassengers, fleetLabel, normalizeDiscount, serviceInBologna, tripFleet, VEHICLES } from "@/lib/tariff";
 import type { Place } from "@/lib/types";
 
 const field = "h-12 w-full rounded-md border border-border bg-bg px-3 text-base";
@@ -77,12 +77,19 @@ export function CustomerRequest({ token }: { token: string }) {
     setBusy(true);
     setError("");
     try {
-      const people = Math.max(1, Number(passengers) || 1);
+      const people = Math.min(16, Math.max(1, Number(passengers) || 1));
       const bags = Math.max(0, Number(luggage) || 0);
-      const vehicle = people > 3 || bags > 4 ? "van" : booking.trip.vehicle === "van" && bags > 4 ? "van" : people > 3 ? "van" : booking.trip.vehicle;
-      const forced = people > VEHICLES.car.passengers || bags > VEHICLES.car.bagsMax ? "van" : vehicle;
+      const fleet = people > 8 ? fleetForPassengers(people, bags) : undefined;
+      const forced = fleet ? "van" : people > VEHICLES.car.passengers || bags > VEHICLES.car.bagsIncluded ? "van" : booking.trip.vehicle;
       const back = booking.trip.roundTrip ? [destination, origin] : null;
-      const route = await routeTrip([origin, destination, ...booking.trip.stops], back, new AbortController().signal);
+      const [route, remote] = await Promise.all([
+        routeTrip([origin, ...booking.trip.stops, destination], back, new AbortController().signal),
+        farFromBase(origin, destination),
+      ]);
+      const code = booking.quote.discountCode ?? "";
+      const found = code
+        ? normalizeDiscount(await lookupDiscount({ data: { code } }).catch(() => findDiscount(code)))
+        : null;
       const quote = buildQuote({
         vehicle: forced,
         km: route.km,
@@ -96,13 +103,20 @@ export function CustomerRequest({ token }: { token: string }) {
         returnDate,
         returnTime,
         luggage: bags,
-        childSeats: booking.trip.childSeats,
-        boosters: booking.trip.boosters,
+        childSeats: 0,
+        boosters: 0,
         meetGreet: booking.trip.meetGreet,
-        pet: booking.trip.pet,
+        pet: false,
         waitMinutes: booking.trip.waitMinutes,
         stopCount: booking.trip.stops.length,
-        discountCode: booking.quote.discountCode ?? "",
+        discountCode: booking.paymentMethod === "rate" ? "" : found?.code ?? "",
+        discountRules: booking.paymentMethod === "rate" || !found ? [] : [found],
+        passengers: people,
+        approachKm: booking.quote.approachKm ?? 0,
+        remote,
+        includeSlow: Boolean(booking.quote.includeSlow) || booking.quote.lines.some((line) => line.kind === "slow"),
+        bologna: serviceInBologna([origin, destination, ...booking.trip.stops]),
+        vehicleStay: Boolean(booking.trip.roundTrip && booking.trip.vehicleStay),
       });
       const next = await updatePublicBooking({
         data: {
@@ -122,6 +136,10 @@ export function CustomerRequest({ token }: { token: string }) {
             passengers: people,
             luggage: bags,
             vehicle: forced,
+            fleet,
+            childSeats: 0,
+            boosters: 0,
+            pet: false,
           },
         },
       });
@@ -138,7 +156,7 @@ export function CustomerRequest({ token }: { token: string }) {
   if (missing) {
     return (
       <main className="mx-auto w-full max-w-xl px-4 py-10">
-        <h1 className="font-display text-4xl">Richiesta non trovata</h1>
+        <h1 className="text-center text-2xl">Richiesta non trovata</h1>
         <p className="mt-2 text-muted">Il link non è più valido.</p>
       </main>
     );
@@ -157,7 +175,7 @@ export function CustomerRequest({ token }: { token: string }) {
   return (
     <main className="mx-auto w-full max-w-xl px-4 py-8">
       <p className="text-sm text-primary">{booking.code}</p>
-      <h1 className="mt-1 font-display text-4xl">La tua richiesta</h1>
+      <h1 className="mt-1 text-center text-2xl">La tua richiesta</h1>
       <p className="mt-2 text-muted">
         {confirmed ? "Confermata da MT TRAVEL SERVICE." : "In attesa di conferma. Non paghi ora."}
       </p>
@@ -235,9 +253,10 @@ export function CustomerRequest({ token }: { token: string }) {
           <p className="text-muted">verso {booking.trip.destination.label}</p>
           <p className="mt-3">{formatWhen(booking.trip.date, booking.trip.time)}</p>
           <p className="mt-1 text-sm text-muted">
-            {VEHICLES[booking.trip.vehicle].name} · {peopleLabel(booking.trip.passengers)} · {paymentLabel(booking.paymentMethod)}
+            {fleetLabel(tripFleet(booking.trip))} · {peopleLabel(booking.trip.passengers)} · {paymentLabel(booking.paymentMethod)}
           </p>
-          <p className="mt-3 font-display text-3xl tabular-nums">{euro(booking.quote.total)}</p>
+          <p className="mt-3 text-center text-2xl font-semibold tabular-nums">{customerPrice(booking.quote.total, priceMarked(booking.quote))}</p>
+          {booking.quote.remote ? <p className="mt-2 text-sm text-muted">{REMOTE_NOTICE}</p> : null}
           <p className="mt-3">
             {booking.customer.firstName} {booking.customer.lastName}
           </p>

@@ -1,14 +1,27 @@
 import { createServerFn } from "@tanstack/react-start";
 import { makeBookingCode, type Booking, type PaymentMethod } from "@/lib/bookings";
+import { fleetForPassengers } from "@/lib/tariff";
 
 const METHODS = new Set<PaymentMethod>(["bonifico", "link", "satispay", "rate"]);
 
-type PinInput = { pin: string };
+type PinInput = { staffEmail?: string; pin?: string };
+
+const OWNER_EMAIL = "info@mttravelservice.com";
 
 function cleanPin(value: unknown) {
   const pin = typeof value === "string" ? value.trim() : "";
   if (pin.length < 4 || pin.length > 40) throw new Error("Il codice deve avere almeno 4 caratteri.");
   return pin;
+}
+
+function cleanEmail(value: unknown) {
+  const email = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 120) throw new Error("Mail non valida.");
+  return email;
+}
+
+function cleanAuth(input: PinInput | null | undefined) {
+  return { staffEmail: cleanEmail(input?.staffEmail), pin: cleanPin(input?.pin) };
 }
 
 async function pinTools() {
@@ -30,18 +43,14 @@ async function pinTools() {
   };
 }
 
-async function lockHash() {
+async function requirePin(email: string, pin: string) {
   const { getSql } = await import("@/lib/db");
   const sql = await getSql();
-  const rows = await sql<{ pin_hash: string }>`select pin_hash from staff_lock where id = 1`;
-  return { sql, hash: rows[0]?.pin_hash ?? null };
-}
-
-async function requirePin(pin: string) {
-  const { sql, hash } = await lockHash();
-  if (!hash) throw new Error("Prima crea il codice di gestione.");
+  const rows = await sql<{ pin_hash: string }>`select pin_hash from staff_logins where email = ${email}`;
+  const stored = rows[0]?.pin_hash;
+  if (!stored) throw new Error("Mail o codice non validi.");
   const tools = await pinTools();
-  if (!tools.matches(pin, hash)) throw new Error("Codice non valido.");
+  if (!tools.matches(pin, stored)) throw new Error("Mail o codice non validi.");
   return sql;
 }
 
@@ -81,18 +90,26 @@ function incomingBooking(input: unknown) {
   const customerRaw = asRecord(body.customer, "Cliente");
   const quoteRaw = asRecord(body.quote, "Preventivo");
   const paymentMethod = text(body.paymentMethod, 20) as PaymentMethod;
-  if (!METHODS.has(paymentMethod)) throw new Error("Scegli un metodo di pagamento.");
+  const quoteCode = text(quoteRaw.discountCode, 40).toUpperCase();
+  const convenzione = quoteCode === "CONVENZIONE20";
+  if (!convenzione && !METHODS.has(paymentMethod)) throw new Error("Scegli un metodo di pagamento.");
+  if (paymentMethod && !METHODS.has(paymentMethod)) throw new Error("Scegli un metodo di pagamento.");
   const firstName = text(customerRaw.firstName, 80);
   const lastName = text(customerRaw.lastName, 80);
   const phone = text(customerRaw.phone, 30);
   const email = text(customerRaw.email, 120);
-  if (firstName.length < 2 || lastName.length < 2) throw new Error("Nome non valido.");
-  if (phone.replace(/\D/g, "").length < 8 || !email.includes("@")) throw new Error("Contatti non validi.");
+  if (!convenzione && (firstName.length < 2 || lastName.length < 2)) throw new Error("Nome non valido.");
+  if (!convenzione && (phone.replace(/\D/g, "").length < 8 || !email.includes("@"))) {
+    throw new Error("Contatti non validi.");
+  }
   const vehicle: "car" | "van" = tripRaw.vehicle === "van" ? "van" : "car";
   if (tripRaw.vehicle !== "van" && tripRaw.vehicle !== "car") throw new Error("Veicolo non valido.");
   const stops = Array.isArray(tripRaw.stops) ? tripRaw.stops.slice(0, 6).map(place) : [];
   const total = Number(quoteRaw.total);
   if (!Number.isFinite(total) || total <= 0) throw new Error("Preventivo non valido.");
+  const passengers = Math.min(16, Math.max(1, Number(tripRaw.passengers) || 1));
+  const luggage = Math.min(60, Math.max(0, Number(tripRaw.luggage) || 0));
+  const fleet = passengers > 8 ? fleetForPassengers(passengers, luggage) : undefined;
   const trip = {
     origin: place(tripRaw.origin),
     destination: place(tripRaw.destination),
@@ -104,22 +121,24 @@ function incomingBooking(input: unknown) {
     landingTime: text(tripRaw.landingTime, 5),
     returnDate: text(tripRaw.returnDate, 10),
     returnTime: text(tripRaw.returnTime, 5),
-    passengers: Math.min(8, Math.max(1, Number(tripRaw.passengers) || 1)),
-    luggage: Math.min(30, Math.max(0, Number(tripRaw.luggage) || 0)),
-    oversized: Boolean(tripRaw.oversized) || Number(tripRaw.luggage) > 10,
+    passengers,
+    luggage,
+    oversized: Boolean(tripRaw.oversized) || luggage > 10,
     oversizedNote: text(tripRaw.oversizedNote, 400),
-    vehicle,
-    childSeats: Math.min(4, Math.max(0, Number(tripRaw.childSeats) || 0)),
-    boosters: Math.min(4, Math.max(0, Number(tripRaw.boosters) || 0)),
+    vehicle: fleet && fleet.vans > 0 ? "van" : vehicle,
+    fleet,
+    childSeats: 0,
+    boosters: 0,
     meetGreet: Boolean(tripRaw.meetGreet),
-    pet: Boolean(tripRaw.pet),
-    waitMinutes: Math.min(240, Math.max(0, Number(tripRaw.waitMinutes) || 0)),
+    pet: false,
+    waitMinutes: Math.min(720, Math.max(0, Number(tripRaw.waitMinutes) || 0)),
+    vehicleStay: Boolean(tripRaw.roundTrip) && Boolean(tripRaw.vehicleStay),
     flight: text(tripRaw.flight, 40),
   };
-  if ((trip.oversized || trip.luggage > 10) && trip.oversizedNote.length < 3) {
+  if (!convenzione && (trip.oversized || trip.luggage > 10) && trip.oversizedNote.length < 3) {
     throw new Error("Descrivi i bagagli fuori misura.");
   }
-  if (!trip.date || !trip.time) throw new Error("Data non valida.");
+  if (!convenzione && (!trip.date || !trip.time)) throw new Error("Data non valida.");
   return {
     trip,
     customer: { firstName, lastName, phone, email, notes: text(customerRaw.notes, 500) },
@@ -142,7 +161,7 @@ function rowToBooking(row: {
 }): Booking {
   const method = METHODS.has(row.payment_method as PaymentMethod)
     ? (row.payment_method as PaymentMethod)
-    : "bonifico";
+    : ("" as PaymentMethod);
   return {
     id: row.id,
     code: row.code,
@@ -158,17 +177,72 @@ function rowToBooking(row: {
 }
 
 export const staffStatus = createServerFn({ method: "GET" }).handler(async () => {
-  const { hash } = await lockHash();
-  return { claimed: Boolean(hash) };
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  const rows = await sql<{ email: string }>`select email from staff_logins where owner = true limit 1`;
+  return { claimed: Boolean(rows[0]) };
 });
 
 export const claimStaff = createServerFn({ method: "POST" })
   .validator((input: PinInput) => ({ pin: cleanPin(input?.pin) }))
   .handler(async ({ data }) => {
-    const { sql, hash } = await lockHash();
-    if (hash) throw new Error("Il codice esiste già.");
+    const { getSql } = await import("@/lib/db");
+    const sql = await getSql();
+    const rows = await sql<{ email: string }>`select email from staff_logins where owner = true limit 1`;
+    if (rows[0]) throw new Error("L'accesso esiste già.");
     const tools = await pinTools();
-    await sql`insert into staff_lock (id, pin_hash) values (1, ${tools.hash(data.pin)})`;
+    await sql`
+      insert into staff_logins (email, pin_hash, owner)
+      values (${OWNER_EMAIL}, ${tools.hash(data.pin)}, true)
+    `;
+    return { ok: true as const };
+  });
+
+export const listStaffLogins = createServerFn({ method: "POST" })
+  .validator((input: PinInput) => cleanAuth(input))
+  .handler(async ({ data }) => {
+    const sql = await requirePin(data.staffEmail, data.pin);
+    const rows = await sql<{ email: string; owner: boolean | string }>`
+      select email, owner from staff_logins order by owner desc, email
+    `;
+    return rows.map((row) => ({
+      email: row.email,
+      owner: row.owner === true || row.owner === "t" || row.owner === "true",
+    }));
+  });
+
+export const saveStaffLogin = createServerFn({ method: "POST" })
+  .validator((input: PinInput & { loginEmail?: string; loginPin?: string }) => ({
+    ...cleanAuth(input),
+    loginEmail: cleanEmail(input?.loginEmail),
+    loginPin: cleanPin(input?.loginPin),
+  }))
+  .handler(async ({ data }) => {
+    const sql = await requirePin(data.staffEmail, data.pin);
+    if (data.loginEmail === OWNER_EMAIL) {
+      throw new Error("Il codice di info@mttravelservice.com resta quello già impostato.");
+    }
+    const count = await sql<{ n: number | string }>`select count(*)::int as n from staff_logins`;
+    const existing = await sql<{ email: string }>`select email from staff_logins where email = ${data.loginEmail}`;
+    if (!existing[0] && Number(count[0]?.n) >= 20) throw new Error("Puoi autorizzare al massimo 20 mail.");
+    const tools = await pinTools();
+    await sql`
+      insert into staff_logins (email, pin_hash, owner)
+      values (${data.loginEmail}, ${tools.hash(data.loginPin)}, false)
+      on conflict (email) do update set pin_hash = excluded.pin_hash
+    `;
+    return { ok: true as const };
+  });
+
+export const removeStaffLogin = createServerFn({ method: "POST" })
+  .validator((input: PinInput & { loginEmail?: string }) => ({
+    ...cleanAuth(input),
+    loginEmail: cleanEmail(input?.loginEmail),
+  }))
+  .handler(async ({ data }) => {
+    const sql = await requirePin(data.staffEmail, data.pin);
+    if (data.loginEmail === OWNER_EMAIL) throw new Error("Questa mail non si può togliere.");
+    await sql`delete from staff_logins where email = ${data.loginEmail} and owner = false`;
     return { ok: true as const };
   });
 
@@ -221,9 +295,11 @@ export const createStaffQuote = createServerFn({ method: "POST" })
   .validator((input: unknown) => {
     const body = asRecord(input, "Preventivo");
     const pin = cleanPin(body.pin);
+    const staffEmail = cleanEmail(body.staffEmail);
     const vehicle: "car" | "van" = body.vehicle === "van" ? "van" : "car";
-    const passengers = Math.min(8, Math.max(0, Number(body.passengers) || 0));
-    const luggage = Math.min(30, Math.max(0, Number(body.luggage) || 0));
+    const passengers = Math.min(16, Math.max(0, Number(body.passengers) || 0));
+    const luggage = Math.min(60, Math.max(0, Number(body.luggage) || 0));
+    const fleet = passengers > 8 ? fleetForPassengers(passengers, luggage) : undefined;
     const total = Number(body.total);
     const amount = Number.isFinite(total) && total > 0 ? Math.round(total * 100) / 100 : 0;
     const paymentRaw = text(body.paymentMethod, 20);
@@ -256,6 +332,7 @@ export const createStaffQuote = createServerFn({ method: "POST" })
           : [];
     return {
       pin,
+      staffEmail,
       paymentMethod,
       trip: {
         origin: {
@@ -280,12 +357,14 @@ export const createStaffQuote = createServerFn({ method: "POST" })
         luggage,
         oversized: luggage > 10 || Boolean(body.oversized),
         oversizedNote,
-        vehicle,
+        vehicle: fleet && fleet.vans > 0 ? "van" : vehicle,
+        fleet,
         childSeats: 0,
         boosters: 0,
         meetGreet: false,
         pet: false,
-        waitMinutes: 0,
+        waitMinutes: Math.min(720, Math.max(0, Number(body.waitMinutes) || 0)),
+        vehicleStay: Boolean(body.roundTrip) && Boolean(body.vehicleStay),
         flight: text(body.flight, 40),
       },
       customer: {
@@ -305,12 +384,16 @@ export const createStaffQuote = createServerFn({ method: "POST" })
         holiday: null,
         vehicle,
         sameDayChoice: null,
+        appliedWait: Math.min(720, Math.max(0, Number(body.waitMinutes) || 0)),
         discountCode: null,
+        approachKm: Math.max(0, Number(body.approachKm) || 0) || undefined,
+        approachAmount: Math.max(0, Number(body.approachAmount) || 0) || undefined,
+        remote: body.remote === true || undefined,
       },
     };
   })
   .handler(async ({ data }) => {
-    const sql = await requirePin(data.pin);
+    const sql = await requirePin(data.staffEmail, data.pin);
     const id = crypto.randomUUID();
     const code = makeBookingCode();
     const created = new Date().toISOString();
@@ -346,9 +429,9 @@ export const createStaffQuote = createServerFn({ method: "POST" })
   });
 
 export const listStaffBookings = createServerFn({ method: "POST" })
-  .validator((input: PinInput) => ({ pin: cleanPin(input?.pin) }))
+  .validator((input: PinInput) => cleanAuth(input))
   .handler(async ({ data }) => {
-    const sql = await requirePin(data.pin);
+    const sql = await requirePin(data.staffEmail, data.pin);
     const rows = await sql<{
       id: string;
       code: string;
@@ -370,8 +453,8 @@ export const listStaffBookings = createServerFn({ method: "POST" })
 
 export const confirmStaffBooking = createServerFn({ method: "POST" })
   .validator(
-    (input: { pin: string; id: string; paymentMethod: PaymentMethod; paymentLink: string }) => {
-      const pin = cleanPin(input?.pin);
+    (input: { staffEmail?: string; pin?: string; id: string; paymentMethod: PaymentMethod; paymentLink: string }) => {
+      const auth = cleanAuth(input);
       const id = text(input?.id, 80);
       const paymentMethod = input?.paymentMethod;
       if (!id || !METHODS.has(paymentMethod)) throw new Error("Richiesta non valida.");
@@ -379,11 +462,11 @@ export const confirmStaffBooking = createServerFn({ method: "POST" })
       if (paymentMethod !== "bonifico" && !/^https?:\/\/\S+$/i.test(paymentLink)) {
         throw new Error("Incolla il link di pagamento, completo di https://");
       }
-      return { pin, id, paymentMethod, paymentLink: paymentMethod === "bonifico" ? "" : paymentLink };
+      return { ...auth, id, paymentMethod, paymentLink: paymentMethod === "bonifico" ? "" : paymentLink };
     },
   )
   .handler(async ({ data }) => {
-    const sql = await requirePin(data.pin);
+    const sql = await requirePin(data.staffEmail, data.pin);
     const rows = await sql<{ id: string }>`
       update bookings
       set status = 'confirmed', payment_method = ${data.paymentMethod}, payment_link = ${data.paymentLink}, revised = false
@@ -394,10 +477,74 @@ export const confirmStaffBooking = createServerFn({ method: "POST" })
     return { ok: true as const };
   });
 
-export const removeStaffBooking = createServerFn({ method: "POST" })
-  .validator((input: { pin: string; id: string }) => ({ pin: cleanPin(input?.pin), id: text(input?.id, 80) }))
+export const updateStaffBooking = createServerFn({ method: "POST" })
+  .validator((input: unknown) => {
+    const body = asRecord(input, "Richiesta");
+    const id = text(body.id, 80);
+    if (!id) throw new Error("Richiesta non valida.");
+    return {
+      ...cleanAuth({ staffEmail: typeof body.staffEmail === "string" ? body.staffEmail : "", pin: typeof body.pin === "string" ? body.pin : "" }),
+      id,
+      pageOrigin: text(body.pageOrigin, 300),
+      paymentLink: text(body.paymentLink, 500),
+      notify: body.notify !== false,
+      ...incomingBooking(body),
+    };
+  })
   .handler(async ({ data }) => {
-    const sql = await requirePin(data.pin);
+    const sql = await requirePin(data.staffEmail, data.pin);
+    const rows = await sql<{
+      edit_token: string;
+      status: string;
+      code: string;
+      created_at: string;
+      revised: boolean | null;
+    }>`
+      select edit_token, status, code, created_at::text, revised
+      from bookings
+      where id = ${data.id}
+    `;
+    const current = rows[0];
+    if (!current?.edit_token) throw new Error("Richiesta non trovata.");
+    const quote = data.quote as Booking["quote"];
+    await sql`
+      update bookings
+      set payment_method = ${data.paymentMethod},
+          payment_link = ${data.paymentLink},
+          trip = ${JSON.stringify(data.trip)}::jsonb,
+          customer = ${JSON.stringify(data.customer)}::jsonb,
+          quote = ${JSON.stringify(quote)}::jsonb
+      where id = ${data.id}
+    `;
+    const booking: Booking = {
+      id: data.id,
+      code: current.code,
+      createdAt: String(current.created_at),
+      status: current.status === "confirmed" ? "confirmed" : "pending",
+      paymentMethod: data.paymentMethod,
+      paymentLink: data.paymentLink,
+      trip: data.trip as Booking["trip"],
+      customer: data.customer,
+      quote,
+      revised: Boolean(current.revised),
+    };
+    const links = await bookingLinks(current.edit_token, data.pageOrigin);
+    if (!data.notify) return { booking, mailed: false, notice: "" };
+    const { deliverMail, staffChangeMail } = await import("@/lib/mail.server");
+    const message = staffChangeMail(booking, links.viewUrl);
+    let mailed = false;
+    try {
+      mailed = await deliverMail({ sql, to: booking.customer.email, ...message });
+    } catch {
+      mailed = false;
+    }
+    return { booking, mailed, notice: message.text };
+  });
+
+export const removeStaffBooking = createServerFn({ method: "POST" })
+  .validator((input: { staffEmail?: string; pin?: string; id: string }) => ({ ...cleanAuth(input), id: text(input?.id, 80) }))
+  .handler(async ({ data }) => {
+    const sql = await requirePin(data.staffEmail, data.pin);
     await sql`delete from bookings where id = ${data.id}`;
     return { ok: true as const };
   });
@@ -509,23 +656,23 @@ export const updatePublicBooking = createServerFn({ method: "POST" })
   });
 
 export const alertSettings = createServerFn({ method: "POST" })
-  .validator((input: PinInput) => ({ pin: cleanPin(input?.pin) }))
+  .validator((input: PinInput) => cleanAuth(input))
   .handler(async ({ data }) => {
-    const sql = await requirePin(data.pin);
+    const sql = await requirePin(data.staffEmail, data.pin);
     const { loadAlerts } = await import("@/lib/mail.server");
     const alerts = await loadAlerts(sql);
     return { notifyEmail: alerts.notify_email, mailReady: alerts.smtp_pass.trim().length > 8 };
   });
 
 export const saveAlertSettings = createServerFn({ method: "POST" })
-  .validator((input: { pin?: string; notifyEmail?: string; smtpPass?: string }) => {
-    const pin = cleanPin(input?.pin);
+  .validator((input: { staffEmail?: string; pin?: string; notifyEmail?: string; smtpPass?: string }) => {
+    const auth = cleanAuth(input);
     const notifyEmail = text(input?.notifyEmail, 120);
     if (!notifyEmail.includes("@")) throw new Error("Email non valida.");
-    return { pin, notifyEmail, smtpPass: text(input?.smtpPass, 80) };
+    return { ...auth, notifyEmail, smtpPass: text(input?.smtpPass, 80) };
   })
   .handler(async ({ data }) => {
-    const sql = await requirePin(data.pin);
+    const sql = await requirePin(data.staffEmail, data.pin);
     if (data.smtpPass) {
       await sql`
         update staff_alerts
@@ -538,5 +685,173 @@ export const saveAlertSettings = createServerFn({ method: "POST" })
     const { loadAlerts } = await import("@/lib/mail.server");
     const alerts = await loadAlerts(sql);
     return { ok: true as const, mailReady: alerts.smtp_pass.trim().length > 8 };
+  });
+
+type DiscountRow = {
+  code: string;
+  active: boolean | string;
+  total_percent: number | string;
+  ride_percent: number | string;
+  min_fare: number | string;
+  night_percent: number | string;
+  holiday_percent: number | string;
+  wait_percent: number | string;
+  meet_greet_free: boolean | string;
+  max_discount?: number | string;
+  vehicle?: string;
+};
+
+function discountVehicle(value: unknown): "all" | "car" | "van" {
+  return value === "car" || value === "van" ? value : "all";
+}
+
+function flag(value: boolean | string) {
+  return value === true || value === "t" || value === "true" || value === "1";
+}
+
+function amount(value: number | string) {
+  const next = Number(value);
+  if (!Number.isFinite(next)) return 0;
+  return Math.min(100, Math.max(0, Math.round(next * 100) / 100));
+}
+
+function fare(value: number | string) {
+  const next = Number(value);
+  if (!Number.isFinite(next) || next < 0) return 0;
+  return Math.round(next * 100) / 100;
+}
+
+function toDiscount(row: DiscountRow) {
+  return {
+    code: String(row.code).trim().toUpperCase(),
+    active: flag(row.active),
+    totalPercent: amount(row.total_percent),
+    ridePercent: amount(row.ride_percent),
+    minFare: fare(row.min_fare),
+    nightPercent: amount(row.night_percent),
+    holidayPercent: amount(row.holiday_percent),
+    waitPercent: amount(row.wait_percent),
+    meetGreetFree: flag(row.meet_greet_free),
+    maxAmount: fare(row.max_discount ?? 0),
+    vehicle: discountVehicle(row.vehicle),
+  };
+}
+
+function cleanCode(value: unknown) {
+  const code = text(value, 20).toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (code.length < 3) throw new Error("Il codice deve avere almeno 3 lettere o numeri.");
+  return code;
+}
+
+type DiscountInput = {
+  staffEmail?: string;
+  pin?: string;
+  previousCode?: string;
+  code?: string;
+  active?: boolean;
+  totalPercent?: number;
+  ridePercent?: number;
+  minFare?: number;
+  nightPercent?: number;
+  holidayPercent?: number;
+  waitPercent?: number;
+  meetGreetFree?: boolean;
+  maxAmount?: number;
+  vehicle?: string;
+};
+
+function cleanDiscount(input: DiscountInput) {
+  return {
+    staffEmail: cleanEmail(input.staffEmail),
+    pin: cleanPin(input.pin),
+    previousCode: text(input.previousCode, 20).toUpperCase(),
+    code: cleanCode(input.code),
+    active: input.active !== false,
+    totalPercent: amount(input.totalPercent ?? 0),
+    ridePercent: amount(input.ridePercent ?? 0),
+    minFare: fare(input.minFare ?? 0),
+    nightPercent: amount(input.nightPercent ?? 0),
+    holidayPercent: amount(input.holidayPercent ?? 0),
+    waitPercent: amount(input.waitPercent ?? 0),
+    meetGreetFree: input.meetGreetFree === true,
+    maxAmount: fare(input.maxAmount ?? 0),
+    vehicle: discountVehicle(input.vehicle),
+  };
+}
+
+export const listDiscountCodes = createServerFn({ method: "POST" })
+  .validator((input: PinInput) => cleanAuth(input))
+  .handler(async ({ data }) => {
+    const sql = await requirePin(data.staffEmail, data.pin);
+    const rows = await sql<DiscountRow>`select * from discount_codes order by code`;
+    return rows.map(toDiscount);
+  });
+
+export const listPublicDiscounts = createServerFn({ method: "GET" }).handler(async () => {
+  const { getSql } = await import("@/lib/db");
+  const sql = await getSql();
+  const rows = await sql<DiscountRow>`
+    select code, active,
+      total_percent::float8 as total_percent,
+      ride_percent::float8 as ride_percent,
+      min_fare::float8 as min_fare,
+      night_percent::float8 as night_percent,
+      holiday_percent::float8 as holiday_percent,
+      wait_percent::float8 as wait_percent,
+      max_discount::float8 as max_discount,
+      vehicle,
+      meet_greet_free
+    from discount_codes
+    where active = true
+    order by code
+  `;
+  return rows.map(toDiscount);
+});
+
+export const lookupDiscount = createServerFn({ method: "POST" })
+  .validator((input: { code?: string }) => text(input?.code, 20).toUpperCase().replace(/[^A-Z0-9]/g, ""))
+  .handler(async ({ data }) => {
+    if (data.length < 3) return null;
+    const { getSql } = await import("@/lib/db");
+    const sql = await getSql();
+    const rows = await sql<DiscountRow>`select * from discount_codes where code = ${data} and active = true`;
+    return rows[0] ? toDiscount(rows[0]) : null;
+  });
+
+export const saveDiscountCode = createServerFn({ method: "POST" })
+  .validator((input: DiscountInput) => cleanDiscount(input ?? {}))
+  .handler(async ({ data }) => {
+    const sql = await requirePin(data.staffEmail, data.pin);
+    if (data.previousCode && data.previousCode !== data.code) {
+      await sql`delete from discount_codes where code = ${data.previousCode}`;
+    }
+    await sql`
+      insert into discount_codes (
+        code, active, total_percent, ride_percent, min_fare, night_percent, holiday_percent, wait_percent, meet_greet_free, max_discount, vehicle
+      ) values (
+        ${data.code}, ${data.active}, ${data.totalPercent}, ${data.ridePercent}, ${data.minFare},
+        ${data.nightPercent}, ${data.holidayPercent}, ${data.waitPercent}, ${data.meetGreetFree}, ${data.maxAmount}, ${data.vehicle}
+      )
+      on conflict (code) do update set
+        active = excluded.active,
+        total_percent = excluded.total_percent,
+        ride_percent = excluded.ride_percent,
+        min_fare = excluded.min_fare,
+        night_percent = excluded.night_percent,
+        holiday_percent = excluded.holiday_percent,
+        wait_percent = excluded.wait_percent,
+        meet_greet_free = excluded.meet_greet_free,
+        max_discount = excluded.max_discount,
+        vehicle = excluded.vehicle
+    `;
+    return { ok: true as const, code: data.code };
+  });
+
+export const removeDiscountCode = createServerFn({ method: "POST" })
+  .validator((input: { staffEmail?: string; pin?: string; code?: string }) => ({ ...cleanAuth(input), code: cleanCode(input?.code) }))
+  .handler(async ({ data }) => {
+    const sql = await requirePin(data.staffEmail, data.pin);
+    await sql`delete from discount_codes where code = ${data.code}`;
+    return { ok: true as const };
   });
 

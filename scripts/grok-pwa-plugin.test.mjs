@@ -76,6 +76,7 @@ test("injects x:creator tags when both creator values are set", () => {
     projectId: "",
     creator: "@alice",
     creatorId: "42",
+    site: {},
   });
   assert.match(out, /property="x:creator" content="@alice"/);
   assert.match(out, /property="x:creator:id" content="42"/);
@@ -94,7 +95,7 @@ test("escapes x:creator values", () => {
 });
 
 test("does not duplicate x:creator tags", () => {
-  const ctx = { appName: "Demo", projectId: "", creator: "@alice", creatorId: "42" };
+  const ctx = { appName: "Demo", projectId: "", creator: "@alice", creatorId: "42", site: {} };
   const once = injectGrokPwaHead("<html><head></head></html>", ctx);
   const twice = injectGrokPwaHead(once, ctx);
   assert.equal(once, twice);

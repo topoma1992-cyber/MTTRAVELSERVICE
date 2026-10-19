@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { bagsLabel, euro, formatDuration, formatWhen, kmLabel, paymentDueLine, paymentNotice, peopleLabel } from "@/lib/format";
-import { priceSplit, VEHICLES, billedWaitMinutes, waitBlockLabel, type Quote } from "@/lib/tariff";
+import { bagsLabel, customerPrice, euro, formatDuration, formatWhen, kmLabel, legMeasure, paymentDueLine, paymentNotice, peopleLabel, priceMarked, REMOTE_NOTICE } from "@/lib/format";
+import { priceSplit, billedWaitMinutes, waitBlockLabel, fleetLabel, tripFleet, type Quote } from "@/lib/tariff";
 import type { Place, VehicleId } from "@/lib/types";
 
 export type TripSnapshot = {
@@ -26,7 +26,10 @@ export type TripSnapshot = {
   meetGreet: boolean;
   pet: boolean;
   waitMinutes: number;
+  /** Il veicolo resta a disposizione tra andata e ritorno. */
+  vehicleStay?: boolean;
   flight: string;
+  fleet?: { cars: number; vans: number };
 };
 
 export type Customer = {
@@ -43,7 +46,7 @@ export const PAYMENT_METHODS: { id: PaymentMethod; label: string }[] = [
   { id: "bonifico", label: "Bonifico istantaneo" },
   { id: "link", label: "Link di pagamento" },
   { id: "satispay", label: "Satispay" },
-  { id: "rate", label: "4 rate" },
+  { id: "rate", label: "4 rate Scalapay" },
 ];
 
 export const BANK = {
@@ -118,7 +121,6 @@ export function makeBookingCode() {
 
 export function bookingMessage(booking: Booking) {
   const { trip, customer, quote } = booking;
-  const vehicle = VEHICLES[trip.vehicle];
   const lines = [
     "Richiesta NCC · MT Travel Service",
     `Codice: ${booking.code}`,
@@ -127,7 +129,7 @@ export function bookingMessage(booking: Booking) {
     `Telefono: ${customer.phone}`,
     `Email: ${customer.email}`,
     "",
-    `${vehicle.name} · ${peopleLabel(trip.passengers)} · ${bagsLabel(trip.luggage)} standard`,
+    `${fleetLabel(tripFleet(trip))} · ${peopleLabel(trip.passengers)} · ${bagsLabel(trip.luggage)} standard`,
     `Partenza: ${trip.origin.label}`,
     ...trip.stops.map((stop, index) => `Fermata ${index + 1}: ${stop.label}`),
     `Arrivo: ${trip.destination.label}`,
@@ -139,7 +141,7 @@ export function bookingMessage(booking: Booking) {
     lines.push(`Volo: ${trip.flight.trim() || "—"}`);
     lines.push(`Atterraggio previsto: ${formatWhen(trip.landingDate || trip.date, trip.landingTime)}`);
     lines.push(
-      `Attesa gratuita in aeroporto con cartello nominativo: 1 ora dall'atterraggio previsto. Ritrovo: ${formatWhen(trip.date, trip.time)}`,
+      `Attesa gratuita in aeroporto con cartello nominativo: 1 ora dall'atterraggio previsto.`,
     );
   } else if (trip.flight.trim()) {
     lines.push(`Volo o treno: ${trip.flight.trim()}`);
@@ -155,17 +157,22 @@ export function bookingMessage(booking: Booking) {
     );
   }
   const split = priceSplit(quote.total, trip.passengers);
+  lines.push("");
+  if (quote.legs && quote.legs.length > 1) {
+    for (const leg of quote.legs) lines.push(`${leg.label}: ${legMeasure(leg.km, leg.minutes, quote.estimated)}`);
+  } else {
+    lines.push(`Distanza: ${kmLabel(quote.km)}${quote.estimated ? " (stima)" : ""}`);
+    lines.push(`Durata: ${formatDuration(quote.minutes)}`);
+  }
   lines.push(
-    "",
-    `Distanza: ${kmLabel(quote.km)}${quote.estimated ? " (stima)" : ""}`,
-    `Durata: ${formatDuration(quote.minutes)}`,
     `A passeggero: ${euro(split.perPassenger)}`,
-    `Totale: ${euro(quote.total)}`,
-    `4 rate da ${euro(split.installment)} · totale a rate ${euro(split.installmentTotal)} (+5%)`,
-    ...quote.lines.map((line) => `· ${line.label}: ${euro(line.amount)}`),
+    `Totale: ${customerPrice(quote.total, priceMarked(quote))}`,
+    `4 rate Scalapay da ${euro(split.installment)}`,
+    ...quote.lines.filter((line) => line.kind !== "slow").map((line) => `· ${line.label}: ${euro(line.amount)}`),
   );
   if (customer.notes.trim()) lines.push("", `Note: ${customer.notes.trim()}`);
   lines.push("", `Pagamento scelto: ${paymentLabel(booking.paymentMethod)}`);
+  if (quote.remote) lines.push("", REMOTE_NOTICE);
   lines.push("", "Acqua inclusa. Vietato mangiare e fumare a bordo.");
   lines.push("", paymentNotice(trip.date, trip.time));
   lines.push("", "Preventivo indicativo, da confermare da MT Travel.");
@@ -184,7 +191,6 @@ export function transferCausale(booking: Booking) {
 
 export function confirmationMessage(booking: Booking, paymentLink = booking.paymentLink ?? "") {
   const { trip, customer, quote } = booking;
-  const vehicle = VEHICLES[trip.vehicle];
   const split = priceSplit(quote.total, trip.passengers);
   const method = booking.paymentMethod;
   const lines = [
@@ -192,13 +198,17 @@ export function confirmationMessage(booking: Booking, paymentLink = booking.paym
     "",
     `il transfer ${booking.code} è confermato.`,
     "",
-    `${vehicle.name} · ${peopleLabel(trip.passengers)}`,
+    `${fleetLabel(tripFleet(trip))} · ${peopleLabel(trip.passengers)}`,
     `Partenza: ${trip.origin.label}`,
     `Arrivo: ${trip.destination.label}`,
     `Data: ${formatWhen(trip.date, trip.time)}`,
     trip.roundTrip ? `Ritorno: ${formatWhen(trip.returnDate, trip.returnTime)}` : "Solo andata",
     "",
   ];
+  if (quote.legs && quote.legs.length > 1) {
+    for (const leg of quote.legs) lines.push(`${leg.label}: ${legMeasure(leg.km, leg.minutes, quote.estimated)}`);
+    lines.push("");
+  }
   if (trip.meetGreet && trip.landingTime) {
     lines.push(
       `Attesa gratuita in aeroporto con cartello nominativo: 1 ora dall'orario di atterraggio previsto del volo (${formatWhen(trip.landingDate || trip.date, trip.landingTime)}).`,
@@ -206,11 +216,12 @@ export function confirmationMessage(booking: Booking, paymentLink = booking.paym
     lines.push("");
   }
   if (method === "rate") {
-    lines.push(`Totale a rate: ${euro(split.installmentTotal)} (+5%)`);
-    lines.push(`4 rate da ${euro(split.installment)}`);
+    lines.push(`Totale: ${customerPrice(quote.total, priceMarked(quote))}`);
+    lines.push(`4 rate Scalapay da ${euro(split.installment)}`);
   } else {
-    lines.push(`Totale: ${euro(quote.total)}`);
+    lines.push(`Totale: ${customerPrice(quote.total, priceMarked(quote))}`);
   }
+  if (quote.remote) lines.push("", REMOTE_NOTICE);
   lines.push("");
   if (method === "bonifico") {
     lines.push("Pagamento con bonifico.");
@@ -270,9 +281,11 @@ export function googleCalendarHref(booking: Booking) {
   const { trip, quote } = booking;
   const start = atLocal(trip.date, trip.time);
   const end =
-    trip.roundTrip && trip.returnDate && trip.returnTime
-      ? atLocal(trip.returnDate, trip.returnTime, Math.max(quote.minutes, 45))
-      : atLocal(trip.date, trip.time, Math.max(quote.minutes, 45));
+    quote.legs && quote.legs.length > 1
+      ? atLocal(trip.date, trip.time, Math.max(quote.legs[0]?.minutes ?? 45, 45))
+      : trip.roundTrip && trip.returnDate && trip.returnTime
+        ? atLocal(trip.returnDate, trip.returnTime, Math.max(quote.minutes, 45))
+        : atLocal(trip.date, trip.time, Math.max(quote.minutes, 45));
   const params = new URLSearchParams({
     action: "TEMPLATE",
     text: `Transfer NCC ${booking.code} · MT Travel`,
